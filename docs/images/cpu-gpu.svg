@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 378" width="720" role="img" aria-labelledby="t">
+<title id="t">zero on 6.46 GiB of Windows DLLs: GPU against CPU. The numbers are in the table in docs/benchmarks.md.</title>
+<style>
+  svg { --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --gpu: #2a78d6; --cpu: #c98500; font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
+  @media (prefers-color-scheme: dark) { svg { --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --gpu: #3987e5; --cpu: #d9981a; } }
+  .bg { fill: var(--surface); } .h { fill: var(--ink); font-size: 14px; font-weight: 600; } .t { fill: var(--ink2); font-size: 13px; }
+  .v { fill: var(--ink); font-size: 12px; } .g { fill: var(--gpu); } .c { fill: var(--cpu); }
+</style>
+<rect class="bg" width="720" height="378" rx="8"/>
+<text class="h" x="16" y="26" style="font-size:15px">6.46 GiB of Windows DLLs, block 256 KiB, level 5</text>
+<rect class="g" x="16" y="38" width="12" height="12" rx="3"/><text class="t" x="33" y="49">GPU (Arc iGPU)</text>
+<rect class="c" x="150" y="38" width="12" height="12" rx="3"/><text class="t" x="167" y="49">CPU (18 threads)</text>
+<text class="h" x="16" y="66">Time you wait (seconds)</text>
+<text class="t" x="108" y="101" text-anchor="end">Compress</text>
+<rect class="g" x="118" y="80" width="374.9" height="16" rx="4"><title>GPU, Compress: 24.6 s</title></rect>
+<text class="v" x="498.9" y="93">24.6</text>
+<rect class="c" x="118" y="98" width="344.2" height="16" rx="4"><title>CPU, Compress: 22.6 s</title></rect>
+<text class="v" x="468.2" y="111">22.6</text>
+<text class="t" x="108" y="153" text-anchor="end">Check archive</text>
+<rect class="g" x="118" y="132" width="61.6" height="16" rx="4"><title>GPU, Check archive: 4.0 s</title></rect>
+<text class="v" x="185.6" y="145">4.0</text>
+<rect class="c" x="118" y="150" width="59.2" height="16" rx="4"><title>CPU, Check archive: 3.9 s</title></rect>
+<text class="v" x="183.2" y="163">3.9</text>
+<text class="t" x="108" y="205" text-anchor="end">Extract</text>
+<rect class="g" x="118" y="184" width="546.0" height="16" rx="4"><title>GPU, Extract: 35.9 s</title></rect>
+<text class="v" x="670.0" y="197">35.9</text>
+<rect class="c" x="118" y="202" width="289.5" height="16" rx="4"><title>CPU, Extract: 19.0 s</title></rect>
+<text class="v" x="413.5" y="215">19.0</text>
+<text class="h" x="16" y="252">Processor time the CPU spends (seconds)</text>
+<text class="t" x="108" y="287" text-anchor="end">Compress</text>
+<rect class="g" x="118" y="266" width="59.5" height="16" rx="4"><title>GPU, Compress: 35.2 s</title></rect>
+<text class="v" x="183.5" y="279">35.2</text>
+<rect class="c" x="118" y="284" width="546.0" height="16" rx="4"><title>CPU, Compress: 323.1 s</title></rect>
+<text class="v" x="670.0" y="297">323.1</text>
+<text class="t" x="108" y="339" text-anchor="end">Check archive</text>
+<rect class="g" x="118" y="318" width="18.5" height="16" rx="4"><title>GPU, Check archive: 10.9 s</title></rect>
+<text class="v" x="142.5" y="331">10.9</text>
+<rect class="c" x="118" y="336" width="87.0" height="16" rx="4"><title>CPU, Check archive: 51.5 s</title></rect>
+<text class="v" x="211.0" y="349">51.5</text>
+</svg>

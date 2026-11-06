@@ -173,8 +173,10 @@ struct Device {
     ZE_OK(zeContextCreate(driver, &cd, &ctx));
     ze_command_queue_desc_t qd{ZE_STYPE_COMMAND_QUEUE_DESC, nullptr, 0, 0, 2 /* in order */, 2 /* asynchronous */, 0};
     ZE_OK(zeCommandListCreateImmediate(ctx, dev, &qd, &cl));
-    if (!ocl::load(name, err)) throw Error(err);
-    driver_version = ocl::driver_version;
+    // (the driver's version is the kernel cache's key; the OpenCL runtime, slow to load, waits until something must be compiled)
+    ze_driver_properties_t dp{};
+    dp.stype = 1;
+    driver_version = zeDriverGetProperties(driver, &dp) == 0 ? "ze-" + std::to_string(dp.driverVersion) : "ze-unknown";
     if (!getenv("ZERO_NO_KCACHE")) cache_dir = zero_cache_dir();
     if (!cache_dir.empty()) {
 #ifdef _WIN32
@@ -323,6 +325,7 @@ struct Program {
     bool cached = !bin.empty();
     for (int attempt = 0; attempt < 2; ++attempt) {
       if (bin.empty()) {
+        { std::string cerr; static bool loaded = false; if (!loaded) { if (!ocl::load(dev.name, cerr)) throw Error(cerr); loaded = true; } }
         bin = ocl::compile(src, opts);
         if (!path.empty()) {
           std::error_code ec;

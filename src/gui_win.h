@@ -11,6 +11,9 @@
 // Explorer: a button on the start screen (or --install-shell, --uninstall-shell) registers .zero and the right-click
 // commands for this user only, with no administrator rights. Windows 11 shows them under "Show more options": its first
 // menu is only for signed packages. Each selected file starts a process with --add; they gather in one window.
+//
+// The installer is this same program named zero-setup.exe: it copies itself and the command line it holds as a resource
+// to %LOCALAPPDATA%\Programs\zero, for this user only. --silent installs with no window, --uninstall removes it.
 #pragma once
 #include <windows.h>
 #include <dwmapi.h>
@@ -34,7 +37,7 @@ namespace gui {
 enum : int {
   ID_NONE = 0, ID_ADD_FILES = 102, ID_ADD_FOLDER = 103, ID_OPEN = 104, ID_BROWSE = 107, ID_ADVANCED = 108,
   ID_COMPRESS = 110, ID_EXTRACT = 111, ID_TEST = 112, ID_CANCEL = 113, ID_BACK = 114, ID_SHOW = 115, ID_DETAILS = 116,
-  ID_AGAIN = 117, ID_SHELL = 118, ID_LEVEL = 200, ID_BLOCK = 210, ID_PROC = 220, ID_ROW = 1000
+  ID_AGAIN = 117, ID_SHELL = 118, ID_SETUP_MENU = 119, ID_SETUP_PATH = 120, ID_SETUP_GO = 121, ID_RUN = 122, ID_LEVEL = 200, ID_BLOCK = 210, ID_PROC = 220, ID_ROW = 1000
 };
 constexpr UINT WM_LOG = WM_APP + 1;       // lParam: std::string* (the receiver deletes it)
 constexpr UINT WM_PROGRESS = WM_APP + 2;  // the worker's counters changed
@@ -132,6 +135,132 @@ inline void uninstall() {
 }
 }  // namespace shell
 
+// installing: everything lives in this user's profile, so no administrator is needed
+namespace setup {
+constexpr const wchar_t* kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\zero";
+inline std::wstring env(const wchar_t* name) { const wchar_t* v = _wgetenv(name); return v ? v : L""; }
+inline std::wstring dir() { return env(L"LOCALAPPDATA") + L"\\Programs\\zero"; }
+inline std::wstring shortcut() { return env(L"APPDATA") + L"\\Microsoft\\Windows\\Start Menu\\Programs\\zero.lnk"; }
+inline bool same_path(const std::wstring& a, const std::wstring& b) {
+  std::error_code ec;
+  return fs::equivalent(fs::path(a), fs::path(b), ec) && !ec;
+}
+inline bool is_setup_exe() { return _wcsnicmp(fs::path(shell::exe_path()).filename().c_str(), L"zero-setup", 10) == 0; }
+inline bool running_installed() { return same_path(fs::path(shell::exe_path()).parent_path().wstring(), dir()); }
+inline bool installed() {
+  std::error_code ec;
+  return fs::exists(fs::path(dir()) / L"zero-gui.exe", ec);
+}
+inline void set_str(HKEY k, const wchar_t* n, const std::wstring& v) { RegSetValueExW(k, n, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t))); }
+inline void set_dword(HKEY k, const wchar_t* n, DWORD v) { RegSetValueExW(k, n, 0, REG_DWORD, (const BYTE*)&v, sizeof v); }
+// the user's PATH with our folder added or removed
+inline void edit_path(bool add) {
+  HKEY k = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Environment", 0, nullptr, 0, KEY_READ | KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+  std::wstring path;
+  DWORD type = REG_EXPAND_SZ, n = 0;
+  if (RegQueryValueExW(k, L"Path", nullptr, &type, nullptr, &n) == ERROR_SUCCESS && n) {
+    path.resize(n / sizeof(wchar_t));
+    RegQueryValueExW(k, L"Path", nullptr, &type, (BYTE*)path.data(), &n);
+    while (!path.empty() && path.back() == L'\0') path.pop_back();
+  }
+  // only our entry changes: everything else stays exactly as it was, down to a trailing semicolon
+  const std::wstring d = dir();
+  size_t at = std::wstring::npos;
+  for (size_t i = 0; i <= path.size();) {
+    const size_t e = std::min(path.find(L';', i), path.size());
+    if (e - i == d.size() && _wcsnicmp(path.c_str() + i, d.c_str(), d.size()) == 0) { at = i; break; }
+    i = e + 1;
+  }
+  std::wstring out = path;
+  if (add && at == std::wstring::npos) {
+    if (out.empty()) out = d;
+    else if (out.back() == L';') out += d + L";";
+    else out += L";" + d;
+  } else if (!add && at != std::wstring::npos) {
+    if (at + d.size() < out.size()) out.erase(at, d.size() + 1);  // (with the semicolon after it)
+    else out.erase(at ? at - 1 : 0, d.size() + (at ? 1 : 0));     // (the last one: with the semicolon before it)
+  }
+  if (out != path) {
+    RegSetValueExW(k, L"Path", 0, type, (const BYTE*)out.c_str(), (DWORD)((out.size() + 1) * sizeof(wchar_t)));
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment", SMTO_ABORTIFHUNG, 1000, nullptr);
+  }
+  RegCloseKey(k);
+}
+inline void make_shortcut(const std::wstring& target) {
+  IShellLinkW* l = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&l))) || !l) return;
+  l->SetPath(target.c_str());
+  l->SetIconLocation(target.c_str(), 0);
+  l->SetDescription(L"Compress files and folders, and extract .zero archives");
+  IPersistFile* f = nullptr;
+  if (SUCCEEDED(l->QueryInterface(IID_PPV_ARGS(&f))) && f) { f->Save(shortcut().c_str(), TRUE); f->Release(); }
+  l->Release();
+}
+inline void wait_run(const std::wstring& exe, const std::wstring& args) {
+  SHELLEXECUTEINFOW s{sizeof s};
+  s.fMask = SEE_MASK_NOCLOSEPROCESS;
+  s.lpFile = exe.c_str();
+  s.lpParameters = args.c_str();
+  s.nShow = SW_HIDE;
+  if (ShellExecuteExW(&s) && s.hProcess) { WaitForSingleObject(s.hProcess, 10000); CloseHandle(s.hProcess); }
+}
+// false and a reason when it could not be done
+inline bool install(bool explorer, bool on_path, std::wstring& why) {
+  const fs::path d = dir();
+  std::error_code ec;
+  fs::create_directories(d, ec);
+  const std::wstring gui = (d / L"zero-gui.exe").wstring(), cli = (d / L"zero.exe").wstring();
+  if (!CopyFileW(shell::exe_path().c_str(), gui.c_str(), FALSE)) {
+    why = GetLastError() == ERROR_SHARING_VIOLATION ? L"zero is running. Close its window and try again." : L"Could not write to " + d.wstring();
+    return false;
+  }
+  HRSRC r = FindResourceW(nullptr, MAKEINTRESOURCEW(2), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
+  HGLOBAL g = r ? LoadResource(nullptr, r) : nullptr;
+  const void* bytes = g ? LockResource(g) : nullptr;
+  bool wrote = false;
+  if (bytes) {
+    FILE* f = _wfopen(cli.c_str(), L"wb");
+    if (f) { wrote = fwrite(bytes, 1, SizeofResource(nullptr, r), f) == SizeofResource(nullptr, r); fclose(f); }
+  }
+  if (!wrote) { why = L"Could not write " + cli; return false; }
+  make_shortcut(gui);
+  HKEY k = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kUninstallKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS) {
+    set_str(k, L"DisplayName", L"zero");
+    set_str(k, L"DisplayVersion", widen(ZERO_VERSION));
+    set_str(k, L"DisplayIcon", gui + L",0");
+    set_str(k, L"InstallLocation", d.wstring());
+    set_str(k, L"UninstallString", L"\"" + gui + L"\" --uninstall");
+    set_str(k, L"QuietUninstallString", L"\"" + gui + L"\" --uninstall --silent");
+    set_dword(k, L"NoModify", 1);
+    set_dword(k, L"NoRepair", 1);
+    const uint64_t kb = (fs::file_size(gui, ec) + fs::file_size(cli, ec)) / 1024;
+    set_dword(k, L"EstimatedSize", (DWORD)kb);
+    RegCloseKey(k);
+  }
+  // (the entries name the program that registers them: the installed one)
+  wait_run(gui, explorer ? L"--install-shell" : L"--uninstall-shell");
+  edit_path(on_path);
+  return true;
+}
+// only from the installed copy, so a mistaken call cannot remove anything else. Archives are not touched.
+inline void uninstall() {
+  if (!running_installed()) return;
+  shell::uninstall();
+  edit_path(false);
+  std::error_code ec;
+  fs::remove(fs::path(shortcut()), ec);
+  fs::remove_all(fs::path(env(L"LOCALAPPDATA")) / L"zero" / L"kernels", ec);
+  fs::remove(fs::path(env(L"LOCALAPPDATA")) / L"zero", ec);  // (only if empty)
+  RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKey);
+  fs::remove(fs::path(dir()) / L"zero.exe", ec);
+  // a running exe cannot delete itself: a hidden command does, once this process has ended
+  const std::wstring cmd = L"/c ping -n 3 127.0.0.1 >nul & del /q \"" + shell::exe_path() + L"\" & rmdir \"" + dir() + L"\"";
+  ShellExecuteW(nullptr, L"open", (env(L"ComSpec").empty() ? L"cmd.exe" : env(L"ComSpec")).c_str(), cmd.c_str(), nullptr, SW_HIDE);
+}
+}  // namespace setup
+
 struct Item {
   std::string path, name;
   bool dir = false;
@@ -173,12 +302,14 @@ struct App {
   Theme t;
   ITaskbarList3* taskbar = nullptr;
 
-  enum class View { Home, Compress, Archive, Working, Done } view = View::Home, back_to = View::Home;
+  enum class View { Home, Compress, Archive, Working, Done, Setup, Installed } view = View::Home, back_to = View::Home;
+  bool setup_menu = true, setup_path = false;
+  std::wstring setup_error;
   std::vector<Item> items;
   std::string out_path;
   bool out_chosen = false;
   int level_idx = 1;   // Fast, Balanced, Smallest
-  int block_idx = 3;   // 64 KiB .. 1 MiB
+  int block_idx = 2;   // 64 KiB .. 1 MiB
   int proc_idx = 0;    // GPU, CPU
   bool advanced = false;
   bool shell_on = false;
@@ -199,7 +330,7 @@ struct App {
   DoneInfo done;
   bool show_details = false;
   std::vector<std::string> log;
-  std::unique_ptr<GpuCodec> gpu;  // kept between jobs (the kernels stay loaded); used on the worker only
+  std::unique_ptr<SafeCodec> gpu;  // kept between jobs (the kernels stay loaded); used on the worker only
   std::string gpu_error;
 
   // the widgets of the last paint
@@ -404,6 +535,38 @@ struct App {
     if (shell_on) text(L"In Explorer: right-click, Show more options", D2D1::RectF(24, by + 32, W - 24, by + 54), f_small, t.sub, DWRITE_TEXT_ALIGNMENT_CENTER);
     link(ID_SHELL, D2D1::RectF(cx - 150, by, cx + 150, by + 30), shell_on ? L"Remove zero from the Explorer menu" : L"Add zero to the Explorer menu");
   }
+  void checkbox(int id, D2D1_RECT_F r, const std::wstring& label, const std::wstring& note, bool on) {
+    hot(id, r);
+    if (hover == id) rrect(r, 4, t.ctl_hover);
+    const D2D1_RECT_F b = D2D1::RectF(r.left + 12, r.top + 14, r.left + 32, r.top + 34);
+    if (on) { rrect(b, 4, t.accent); text(std::wstring(1, (wchar_t)0xE73E), b, f_icon, t.accent_text, DWRITE_TEXT_ALIGNMENT_CENTER); }
+    else rrect(b, 4, t.ctl, &t.ctl_line);
+    text(label, D2D1::RectF(r.left + 44, r.top + 6, r.right - 8, r.top + 28), f_body, t.text);
+    text(note, D2D1::RectF(r.left + 44, r.top + 28, r.right - 8, r.top + 46), f_small, t.sub);
+    focus_ring(id, r);
+  }
+  void paint_setup() {
+    const bool update = setup::installed();
+    text(update ? L"Update zero" : L"Install zero", D2D1::RectF(24, 18, W - 24, 58), f_title, t.text);
+    text(L"Compress files and folders, and extract .zero archives", D2D1::RectF(24, 58, W - 24, 80), f_body, t.sub);
+    card(D2D1::RectF(24, 100, W - 24, 160));
+    text(L"Installs to", D2D1::RectF(40, 108, W - 40, 128), f_small, t.sub);
+    text(setup::dir(), D2D1::RectF(40, 126, W - 40, 150), f_path, t.text);
+    const D2D1_RECT_F c = D2D1::RectF(24, 172, W - 24, 296);
+    card(c);
+    checkbox(ID_SETUP_MENU, D2D1::RectF(c.left + 4, c.top + 6, c.right - 4, c.top + 58), L"Add to the Explorer menu", L"Right-click to compress or extract, double-click to open a .zero archive", setup_menu);
+    checkbox(ID_SETUP_PATH, D2D1::RectF(c.left + 4, c.top + 62, c.right - 4, c.top + 114), L"Use zero in a terminal", L"Adds the folder to your PATH, for the zero command", setup_path);
+    text(L"No administrator rights needed. Remove it any time in Settings, Apps.", D2D1::RectF(24, 306, W - 24, 328), f_small, t.sub);
+    if (!setup_error.empty()) text(setup_error, D2D1::RectF(24, 332, W - 24, 356), f_body, t.bad);
+    button(ID_SETUP_GO, D2D1::RectF(W - 184, H - 60, W - 24, H - 24), update ? L"Update" : L"Install", true);
+  }
+  void paint_installed() {
+    const float top = H / 2 - 130;
+    text(std::wstring(1, (wchar_t)0xE73E), D2D1::RectF(40, top, 100, top + 56), f_icon_big, t.good);
+    text(L"zero is installed", D2D1::RectF(40, top + 60, W - 40, top + 96), f_title, t.text);
+    text(L"Find it in the Start menu. To remove it, go to Settings, Apps.", D2D1::RectF(40, top + 98, W - 40, top + 130), f_wrap, t.sub);
+    button(ID_RUN, D2D1::RectF(40, top + 140, 196, top + 176), L"Open zero", true);
+  }
   void paint_rows(D2D1_RECT_F r, size_t n, const std::function<void(size_t, D2D1_RECT_F)>& row) {
     const float rh = 40, content = n * rh;
     card(r);
@@ -557,6 +720,8 @@ struct App {
       case View::Archive: paint_archive(); break;
       case View::Working: paint_working(); break;
       case View::Done: paint_done(); break;
+      case View::Setup: paint_setup(); break;
+      case View::Installed: paint_installed(); break;
     }
     if (rt->EndDraw() == D2DERR_RECREATE_TARGET) make_target();
   }
@@ -703,19 +868,23 @@ struct App {
     if (proc_idx == 0) {
       if (!gpu && gpu_error.empty()) {
         try {
-          gpu = std::make_unique<GpuCodec>();
-          gpu->open(rep);
+          auto g = std::make_unique<GpuCodec>();
+          g->open(rep);
+          gpu = std::make_unique<SafeCodec>(std::move(g));
         } catch (const std::exception& e) {
           gpu.reset();
           gpu_error = e.what();
           rep.say(std::string("GPU unavailable: ") + gpu_error + "; using the CPU");
         }
-      } else if (gpu) {
-        gpu->rep = &rep;
-      } else {
+      } else if (!gpu) {
         rep.say(std::string("GPU unavailable: ") + gpu_error + "; using the CPU");
       }
-      if (gpu) { gpu->level = level; return *gpu; }
+      if (gpu) {
+        gpu->gpu->level = level;
+        gpu->set_report(&rep);
+        gpu->cpu.depth = level <= 1 ? 8 : level >= 9 ? 256 : 32;
+        return *gpu;
+      }
     }
     cpu_holder = std::make_unique<CpuCodec>();
     cpu_holder->depth = level <= 1 ? 8 : level >= 9 ? 256 : 32;
@@ -884,6 +1053,17 @@ struct App {
       case ID_SHOW: show_result(); break;
       case ID_DETAILS: show_details = !show_details; redraw(); break;
       case ID_AGAIN: start_over(); break;
+      case ID_SETUP_MENU: setup_menu = !setup_menu; redraw(); break;
+      case ID_SETUP_PATH: setup_path = !setup_path; redraw(); break;
+      case ID_SETUP_GO:
+        setup_error.clear();
+        if (setup::install(setup_menu, setup_path, setup_error)) go(View::Installed);
+        redraw();
+        break;
+      case ID_RUN:
+        ShellExecuteW(nullptr, L"open", (setup::dir() + L"\\zero-gui.exe").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        PostMessageW(wnd, WM_CLOSE, 0, 0);
+        break;
       case ID_SHELL:
         if (shell_on) shell::uninstall(); else shell::install();
         shell_on = shell::installed();
@@ -977,11 +1157,12 @@ struct App {
           command(focus);
         } else if (wp == VK_ESCAPE) {
           if (view == View::Working) command(ID_CANCEL);
-          else if (view != View::Home) command(ID_BACK);
+          else if (view != View::Home && view != View::Setup && view != View::Installed) command(ID_BACK);
         }
         return 0;
       case WM_DROPFILES: {
         HDROP drop = (HDROP)wp;
+        if (view == View::Setup || view == View::Installed) { DragFinish(drop); return 0; }
         const UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
         std::vector<std::string> paths;
         for (UINT i = 0; i < n; ++i) {
@@ -1101,7 +1282,29 @@ inline int run_gui(std::vector<std::string> args) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   bool add = false, extract = false;
-  if (!args.empty()) {
+  const auto has_flag = [&](const char* f) { return std::find(args.begin(), args.end(), f) != args.end(); };
+  if (has_flag("--uninstall")) {
+    const bool silent = has_flag("--silent");
+    if (!setup::running_installed()) {
+      if (!silent) MessageBoxW(nullptr, L"This is not the installed copy of zero.", L"zero", MB_ICONWARNING);
+      CoUninitialize();
+      return 1;
+    }
+    if (silent || MessageBoxW(nullptr, L"Remove zero from this PC? Your archives stay where they are.", L"Uninstall zero", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+      setup::uninstall();
+      if (!silent) MessageBoxW(nullptr, L"zero has been removed.", L"Uninstall zero", MB_ICONINFORMATION);
+    }
+    CoUninitialize();
+    return 0;
+  }
+  const bool setup_mode = setup::is_setup_exe();
+  if (setup_mode && has_flag("--silent")) {
+    std::wstring why;
+    const bool ok = setup::install(!has_flag("--no-explorer"), has_flag("--add-path"), why);
+    CoUninitialize();
+    return ok ? 0 : 1;
+  }
+  if (!setup_mode && !args.empty()) {
     if (args[0] == "--install-shell") { shell::install(); CoUninitialize(); return 0; }
     if (args[0] == "--uninstall-shell") { shell::uninstall(); CoUninitialize(); return 0; }
     if (args[0] == "--add") { add = true; args.erase(args.begin()); }
@@ -1122,7 +1325,8 @@ inline int run_gui(std::vector<std::string> args) {
     const int dpi = GetDpiForSystem();
     HWND h = CreateWindowExW(0, wc.lpszClassName, L"zero", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(760, dpi, 96), MulDiv(700, dpi, 96), nullptr, nullptr, wc.hInstance, nullptr);
     if (!h) return 1;
-    app.open_paths(args);
+    if (setup_mode) app.go(App::View::Setup);
+    else app.open_paths(args);
     ShowWindow(h, SW_SHOW);
     if (starting) { CloseHandle(starting); starting = nullptr; }  // (the window exists: the next process finds it)
     if (extract && app.view == App::View::Archive) app.do_extract();

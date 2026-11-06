@@ -1,0 +1,555 @@
+{
+ "date": "2026-11-07",
+ "machine": {
+  "cpu": "Intel Core Ultra 5 125H",
+  "threads": 18,
+  "ram_gib": 32,
+  "gpu": "Arc iGPU (Xe-LPG, 112 EUs)",
+  "os": "Windows-11-10.0.26200-SP0",
+  "plugged_in": true
+ },
+ "block_log": 18,
+ "level": 5,
+ "datasets": [
+  {
+   "name": "Text (Windows SDK headers)",
+   "bytes": 360268171,
+   "on_usb": false,
+   "runs": {
+    "gpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 1.82748169999104,
+       "cpu": 1.546875,
+       "peak": 578383872,
+       "ratio": 11.0,
+       "codec": 1.2,
+       "bytes": 39738272
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.6816102000011597,
+       "cpu": 0.59375,
+       "peak": 1551626240
+      },
+      "extract": {
+       "code": 0,
+       "wall": 0.7647109999961685,
+       "cpu": 0.8125,
+       "peak": 1552146432,
+       "codec": 0.12
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 1.2190619000175502,
+       "cpu": 1.5625,
+       "peak": 578441216,
+       "ratio": 11.0,
+       "codec": 0.98,
+       "bytes": 39731672
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.5109259999881033,
+       "cpu": 0.625,
+       "peak": 1551577088
+      },
+      "extract": {
+       "code": 0,
+       "wall": 0.7617497000028379,
+       "cpu": 0.703125,
+       "peak": 1551855616,
+       "codec": 0.12
+      }
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 1.220926200010581,
+       "cpu": 1.59375,
+       "peak": 578334720,
+       "ratio": 11.0,
+       "codec": 0.99,
+       "bytes": 39725500
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.4918506999965757,
+       "cpu": 0.59375,
+       "peak": 1551609856
+      },
+      "extract": {
+       "code": 0,
+       "wall": 0.7659590000112075,
+       "cpu": 0.671875,
+       "peak": 1551937536,
+       "codec": 0.11
+      }
+     }
+    ],
+    "cpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 0.6223715000087395,
+       "cpu": 6.4375,
+       "peak": 188567552,
+       "ratio": 9.4,
+       "codec": 0.5,
+       "bytes": 33767128
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.21812239999417216,
+       "cpu": 0.828125,
+       "peak": 158769152
+      },
+      "extract": {
+       "code": 0,
+       "wall": 1.0672617999953218,
+       "cpu": 1.5,
+       "peak": 158654464,
+       "codec": 0.15
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 1.0720176000031643,
+       "cpu": 6.390625,
+       "peak": 188186624,
+       "ratio": 9.4,
+       "codec": 0.51,
+       "bytes": 33767128
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.2234984999813605,
+       "cpu": 1.234375,
+       "peak": 158130176
+      },
+      "extract": {
+       "code": 0,
+       "wall": 0.46205919998465106,
+       "cpu": 1.171875,
+       "peak": 158466048,
+       "codec": 0.15
+      }
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 0.625622099993052,
+       "cpu": 6.859375,
+       "peak": 189489152,
+       "ratio": 9.4,
+       "codec": 0.5,
+       "bytes": 33767128
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.2276168999960646,
+       "cpu": 1.03125,
+       "peak": 158355456
+      },
+      "extract": {
+       "code": 0,
+       "wall": 0.46069020000868477,
+       "cpu": 1.09375,
+       "peak": 158097408,
+       "codec": 0.15
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "Binaries, 1 GiB (System32 DLLs)",
+   "bytes": 1073741824,
+   "on_usb": false,
+   "runs": {
+    "gpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 4.157255400001304,
+       "cpu": 5.0625,
+       "peak": 593981440,
+       "ratio": 40.0,
+       "codec": 3.36,
+       "bytes": 429409205
+      },
+      "test": {
+       "code": 0,
+       "wall": 1.4055264000198804,
+       "cpu": 1.84375,
+       "peak": 2820055040
+      },
+      "extract": {
+       "code": 0,
+       "wall": 8.599648200004594,
+       "cpu": 2.703125,
+       "peak": 2820603904,
+       "codec": 0.72
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 3.543610799999442,
+       "cpu": 5.09375,
+       "peak": 593764352,
+       "ratio": 40.0,
+       "codec": 3.18,
+       "bytes": 429405331
+      },
+      "test": {
+       "code": 0,
+       "wall": 1.4298226999817416,
+       "cpu": 1.84375,
+       "peak": 2820026368
+      },
+      "extract": {
+       "code": 0,
+       "wall": 2.138245399983134,
+       "cpu": 2.21875,
+       "peak": 2820378624,
+       "codec": 0.7
+      }
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 4.257963900017785,
+       "cpu": 5.125,
+       "peak": 593657856,
+       "ratio": 40.0,
+       "codec": 3.7,
+       "bytes": 429398709
+      },
+      "test": {
+       "code": 0,
+       "wall": 1.4240455999970436,
+       "cpu": 1.875,
+       "peak": 2819985408
+      },
+      "extract": {
+       "code": 0,
+       "wall": 2.1107880999916233,
+       "cpu": 2.21875,
+       "peak": 2820337664,
+       "codec": 0.7
+      }
+     }
+    ],
+    "cpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 3.456853099982254,
+       "cpu": 47.0625,
+       "peak": 227872768,
+       "ratio": 37.9,
+       "codec": 3.17,
+       "bytes": 407245235
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.7519254999933764,
+       "cpu": 7.390625,
+       "peak": 205590528
+      },
+      "extract": {
+       "code": 0,
+       "wall": 1.1983518000051845,
+       "cpu": 8.4375,
+       "peak": 205950976,
+       "codec": 0.58
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 3.386624300008407,
+       "cpu": 45.46875,
+       "peak": 226304000,
+       "ratio": 37.9,
+       "codec": 3.14,
+       "bytes": 407245235
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.7209910999808926,
+       "cpu": 7.609375,
+       "peak": 205733888
+      },
+      "extract": {
+       "code": 0,
+       "wall": 2.7982047999976203,
+       "cpu": 7.59375,
+       "peak": 205373440,
+       "codec": 0.62
+      }
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 3.432351199997356,
+       "cpu": 46.96875,
+       "peak": 227635200,
+       "ratio": 37.9,
+       "codec": 3.19,
+       "bytes": 407245235
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.7186241999734193,
+       "cpu": 7.953125,
+       "peak": 205307904
+      },
+      "extract": {
+       "code": 0,
+       "wall": 1.636220799991861,
+       "cpu": 7.390625,
+       "peak": 203681792,
+       "codec": 0.87
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "Binaries, 6.5 GiB (System32 DLLs)",
+   "bytes": 6934242376,
+   "on_usb": false,
+   "runs": {
+    "gpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 26.23860229999991,
+       "cpu": 35.15625,
+       "peak": 596185088,
+       "ratio": 43.4,
+       "codec": 21.46,
+       "bytes": 3008733494
+      },
+      "test": {
+       "code": 0,
+       "wall": 4.7675484999781474,
+       "cpu": 11.15625,
+       "peak": 3461050368
+      },
+      "extract": {
+       "code": 0,
+       "wall": 44.02598480001325,
+       "cpu": 15.0625,
+       "peak": 3238854656,
+       "codec": 4.16
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 23.002988099993672,
+       "cpu": 35.265625,
+       "peak": 596373504,
+       "ratio": 43.4,
+       "codec": 21.4,
+       "bytes": 3008857934
+      },
+      "test": {
+       "code": 0,
+       "wall": 3.3229470000078436,
+       "cpu": 10.71875,
+       "peak": 3461005312
+      },
+      "extract": {
+       "code": 0,
+       "wall": 27.697365800006082,
+       "cpu": 13.5625,
+       "peak": 3239399424,
+       "codec": 3.66
+      }
+     }
+    ],
+    "cpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 22.240188600000693,
+       "cpu": 318.65625,
+       "peak": 281825280,
+       "ratio": 41.5,
+       "codec": 20.91,
+       "bytes": 2875769619
+      },
+      "test": {
+       "code": 0,
+       "wall": 3.886894899973413,
+       "cpu": 51.90625,
+       "peak": 282103808
+      },
+      "extract": {
+       "code": 0,
+       "wall": 18.126749599992763,
+       "cpu": 51.203125,
+       "peak": 282537984,
+       "codec": 4.74
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 22.970546500000637,
+       "cpu": 327.46875,
+       "peak": 283312128,
+       "ratio": 41.5,
+       "codec": 21.57,
+       "bytes": 2875769619
+      },
+      "test": {
+       "code": 0,
+       "wall": 3.888833299977705,
+       "cpu": 51.078125,
+       "peak": 282841088
+      },
+      "extract": {
+       "code": 0,
+       "wall": 19.905613099981565,
+       "cpu": 49.0,
+       "peak": 282550272,
+       "codec": 5.51
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "Random, 2 GiB (cannot be compressed)",
+   "bytes": 2147483648,
+   "on_usb": false,
+   "runs": {
+    "gpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 5.57521480001742,
+       "cpu": 9.359375,
+       "peak": 535572480,
+       "ratio": 100.0,
+       "codec": 4.55,
+       "bytes": 2147614814
+      },
+      "test": {
+       "code": 0,
+       "wall": 2.2927517000061926,
+       "cpu": 3.859375,
+       "peak": 4275843072
+      },
+      "extract": {
+       "code": 0,
+       "wall": 3.1519319000071846,
+       "cpu": 4.828125,
+       "peak": 4275908608,
+       "codec": 0.84
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 5.523046399990562,
+       "cpu": 8.8125,
+       "peak": 535515136,
+       "ratio": 100.0,
+       "codec": 4.53,
+       "bytes": 2147614814
+      },
+      "test": {
+       "code": 0,
+       "wall": 2.337486699980218,
+       "cpu": 4.0,
+       "peak": 4275875840
+      },
+      "extract": {
+       "code": 0,
+       "wall": 3.2077954999986105,
+       "cpu": 4.765625,
+       "peak": 4275838976,
+       "codec": 0.9
+      }
+     }
+    ],
+    "cpu": [
+     {
+      "compress": {
+       "code": 0,
+       "wall": 8.45627099997364,
+       "cpu": 115.515625,
+       "peak": 173182976,
+       "ratio": 100.0,
+       "codec": 7.57,
+       "bytes": 2147614814
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.8663475000066683,
+       "cpu": 2.96875,
+       "peak": 273743872
+      },
+      "extract": {
+       "code": 0,
+       "wall": 4.549781600013375,
+       "cpu": 4.4375,
+       "peak": 274743296,
+       "codec": 0.25
+      },
+      "identical": true,
+      "cross_decoded": true
+     },
+     {
+      "compress": {
+       "code": 0,
+       "wall": 8.504187699989416,
+       "cpu": 118.453125,
+       "peak": 174235648,
+       "ratio": 100.0,
+       "codec": 7.7,
+       "bytes": 2147614814
+      },
+      "test": {
+       "code": 0,
+       "wall": 0.8677773999806959,
+       "cpu": 3.203125,
+       "peak": 273825792
+      },
+      "extract": {
+       "code": 0,
+       "wall": 1.875735599984182,
+       "cpu": 4.0625,
+       "peak": 274046976,
+       "codec": 0.25
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

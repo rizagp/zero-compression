@@ -2,7 +2,7 @@
 // ZERO_GUI the window (gui_win.h / gui_gtk.h). One source for Windows and Linux.
 #include "archive.h"
 #include "gpu.h"
-#include "gpu_codec.h"
+#include "safe_codec.h"
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -40,7 +40,10 @@ inline CodecChoice choose_codec(bool want_cpu, Report& rep, int level) {
       auto g = std::make_unique<GpuCodec>();
       g->level = level;
       g->open(rep);
-      c.codec = std::move(g);
+      auto s = std::make_unique<SafeCodec>(std::move(g));
+      s->set_report(&rep);
+      s->cpu.depth = level <= 1 ? 8 : level >= 9 ? 256 : 32;
+      c.codec = std::move(s);
       return c;
     } catch (const std::exception& e) {
       c.note = std::string("GPU unavailable (") + e.what() + "); using the CPU";
@@ -61,9 +64,9 @@ inline void usage() {
          "  zero t <archive.zero> [--cpu]\n"
          "  zero bench <file> [--block N] [--cpu]\n"
          "  zero info\n\n"
-         "  --block N   block size as log2 bytes, 16 (64 KiB) .. 20 (1 MiB); default 19 (512 KiB)\n"
-         "  --cpu       use the CPU codec (the reference) instead of the GPU\n"
-         "  --level L   CPU match depth: 1 fast .. 9 thorough (default 5)\n"
+         "  --block N   block size as log2 bytes, 16 (64 KiB) .. 20 (1 MiB); default 18 (256 KiB)\n"
+         "  --cpu       use the CPU instead of the GPU (smaller archives; the CPU is busy)\n"
+         "  --level L   how hard to look for matches: 1 fast .. 9 thorough (default 5)\n"
          "  -q          no progress\n",
          ZERO_VERSION);
 }
@@ -71,7 +74,7 @@ inline void usage() {
 struct Args {
   std::string cmd, out;
   std::vector<std::string> inputs;
-  uint32_t block_log = 19;
+  uint32_t block_log = 18;
   bool cpu = false, quiet = false;
   int level = 5;
 };
@@ -267,6 +270,8 @@ inline int cmd_bench(const Args& a) {
     return ok;
   };
   bool ok = run_decode(*c.codec, c.codec->name().c_str());
+  if (const char* e = getenv("ZERO_BENCH_REPEAT"))
+    for (int i = 1; i < atoi(e); ++i) ok = run_decode(*c.codec, c.codec->name().c_str()) && ok;
   if (c.codec->name() != cpu.name()) ok = run_decode(cpu, cpu.name().c_str()) && ok;
   return ok ? 0 : 1;
 }
@@ -274,6 +279,11 @@ inline int cmd_bench(const Args& a) {
 inline int cli_main(int argc, char** argv) {
   Args a;
   if (!parse(argc, argv, a)) { usage(); return 2; }
+  const double t_main = zero_now();
+  struct AtEnd {
+    double t0;
+    ~AtEnd() { if (getenv("ZERO_PROFILE")) fprintf(stderr, "[profile] main, up to teardown %.3f s\n", zero_now() - t0); }
+  } at_end{t_main};
   try {
     if (a.cmd == "c" || a.cmd == "a") return cmd_compress(a);
     if (a.cmd == "x") return cmd_extract(a);

@@ -167,7 +167,7 @@ struct App {
   std::thread worker;
   std::atomic<bool> cancel{false};
   bool busy = false;
-  std::unique_ptr<GpuCodec> gpu;
+  std::unique_ptr<SafeCodec> gpu;
   std::string gpu_error;
 
   void append_log(const std::string& s) {
@@ -254,15 +254,17 @@ struct App {
     if (!want_cpu) {
       if (!gpu && gpu_error.empty()) {
         try {
-          gpu = std::make_unique<GpuCodec>();
-          gpu->open(rep);
+          auto g = std::make_unique<GpuCodec>();
+          g->open(rep);
+          gpu = std::make_unique<SafeCodec>(std::move(g));
+          gpu->set_report(&rep);
         } catch (const std::exception& e) {
           gpu.reset();
           gpu_error = e.what();
           rep.say(std::string("GPU unavailable: ") + gpu_error + "; using the CPU");
         }
       } else if (gpu) {
-        gpu->rep = &rep;
+        gpu->set_report(&rep);
       }
       if (gpu) return *gpu;
     }

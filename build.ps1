@@ -50,10 +50,13 @@ if ($Only -ne "gui") {
 }
 if ($Only -ne "cli") {
   Write-Host "building bin\zero-gui.exe"
-  cmd /c "$pre rc /nologo /i `"$root\tools`" /fo `"$out\zero.res`" `"$root\tools\zero.rc`""
+  if (-not (Test-Path (Join-Path $out "zero.exe"))) { throw "build the command line first: it goes inside the installer" }
+  cmd /c "$pre rc /nologo /i `"$root\tools`" /i `"$out`" /fo `"$out\zero.res`" `"$root\tools\zero.rc`""
   if ($LASTEXITCODE -ne 0) { throw "build failed: zero.rc" }
-  cmd /c "$pre$common /DZERO_GUI /Fe`"$out\zero-gui.exe`" `"$root\src\main.cpp`" /link /SUBSYSTEM:WINDOWS $manifest user32.lib gdi32.lib shell32.lib ole32.lib advapi32.lib dwmapi.lib d2d1.lib dwrite.lib `"$out\zero.res`""
+  cmd /c "$pre$common /DZERO_GUI /Fe`"$out\zero-gui.exe`" `"$root\src\main.cpp`" /link /SUBSYSTEM:WINDOWS $manifest user32.lib gdi32.lib shell32.lib ole32.lib advapi32.lib dwmapi.lib d2d1.lib dwrite.lib uuid.lib `"$out\zero.res`""
   if ($LASTEXITCODE -ne 0) { throw "build failed: zero-gui.exe" }
+  # the installer is this same program under another name: it holds the command line and installs itself
+  Copy-Item -Force (Join-Path $out "zero-gui.exe") (Join-Path $out "zero-setup.exe")
 }
 Remove-Item (Join-Path $out "*.obj") -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $out "*.res") -ErrorAction SilentlyContinue

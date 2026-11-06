@@ -1,2 +1,3 @@
-// the icon of the window and of .zero files (tools/make_icon.py draws it)
+// the icon of the window and of .zero files (tools/make_icon.py draws it), and the command line for the installer
 1 ICON "zero.ico"
+2 RCDATA "zero.exe"

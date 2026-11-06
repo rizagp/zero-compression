@@ -11,7 +11,7 @@
 // small files share blocks, and every block decompresses on its own.
 #pragma once
 #include <future>
-#include "codec.h"
+#include "codec2.h"
 #include "crc32.h"
 #include "platform.h"
 #include <atomic>
@@ -58,8 +58,8 @@ struct Codec {
   virtual std::string name() const = 0;
   // in: n bytes = whole blocks of block_size (the last may be shorter); out gets one entry per block
   virtual void compress(const uint8_t* in, size_t n, uint32_t block_log, std::vector<BlockOut>& out) = 0;
-  // blocks -> their raw bytes, one after the other (sum of raw_len bytes), in memory the codec owns; valid until
-  // the next call
+  // blocks -> their raw bytes, one after the other (sum of raw_len bytes), in memory the codec owns; valid through the
+  // next call and until the one after, so they can be checked and written while the next batch decodes
   virtual const uint8_t* decompress(const std::vector<BlockIn>& blocks) = 0;
   // how many bytes of input one batch should hold (the GPU has a memory budget; the CPU a cache one)
   virtual size_t batch_bytes(uint32_t block_log) const = 0;
@@ -106,23 +106,27 @@ struct CpuCodec : Codec {
       const size_t off = b * B;
       const uint32_t len = (uint32_t)std::min(B, n - off);
       std::vector<uint8_t> payload;
-      if (zb::compress_block_cpu(in + off, len, payload, depth)) { out[b].method = 1; out[b].data = std::move(payload); }
+      zb2::Params P;
+      P.depth = depth;
+      if (zb2::compress_block(in + off, len, payload, P)) { out[b].method = 1; out[b].data = std::move(payload); }
       else out[b].method = 0;
     });
   }
-  std::vector<uint8_t> outbuf;
+  std::vector<uint8_t> outbuf[2];
+  int out_at = 0;
   const uint8_t* decompress(const std::vector<BlockIn>& blocks) override {
     std::vector<size_t> offs(blocks.size() + 1, 0);
     for (size_t i = 0; i < blocks.size(); ++i) offs[i + 1] = offs[i] + blocks[i].raw_len;
-    outbuf.resize(offs.back());
-    uint8_t* out = outbuf.data();
+    out_at ^= 1;
+    outbuf[out_at].resize(offs.back());
+    uint8_t* out = outbuf[out_at].data();
     parallel_for(blocks.size(), [&](size_t b) {
       const BlockIn& k = blocks[b];
       if (k.method == 0) {
         if (k.comp_len != k.raw_len) throw zb::Error("stored block with a wrong length");
         memcpy(out + offs[b], k.data, k.raw_len);
       } else if (k.method == 1) {
-        zb::decompress_block_cpu(k.data, k.comp_len, out + offs[b], k.raw_len);
+        zb2::decompress_block(k.data, k.comp_len, out + offs[b], k.raw_len);
       } else {
         throw zb::Error("unknown block method");
       }
@@ -350,7 +354,7 @@ inline CompressStats compress_archive(const std::vector<std::string>& inputs, co
   const uint64_t n_blocks = (total + B - 1) / B;
   // header
   fwrite("ZERO", 1, 4, f);
-  w8(f, 1);
+  w8(f, 2);
   w8(f, (uint8_t)block_log);
   w8(f, 0); w8(f, 0);
   w64(f, total);
@@ -449,7 +453,7 @@ inline ArchiveInfo read_info(FILE* f) {
   ArchiveInfo a;
   uint8_t h[24];
   if (fread(h, 1, 24, f) != 24 || memcmp(h, "ZERO", 4) != 0) throw zb::Error("not a .zero archive");
-  if (h[4] != 1) throw zb::Error("archive version " + std::to_string(h[4]) + " is newer than this program");
+  if (h[4] != 2) throw zb::Error("archive version " + std::to_string(h[4]) + ": this program reads version 2");
   a.block_log = h[5];
   a.total_raw = r64(h + 8);
   a.n_blocks = r64(h + 16);
@@ -544,22 +548,23 @@ inline ExtractStats read_blocks(const std::string& path, Codec& codec, Report& r
   size_t batch = codec.batch_bytes_decode(a.block_log);
   batch = std::max(B, (batch / B) * B);
   const size_t per_batch = batch / B;
-  std::vector<uint8_t> comp;
-  std::vector<BlockIn> ins;
-  std::vector<uint32_t> crcs;
-  uint64_t done = 0, blocks_left = a.n_blocks;
-  uint64_t pos = 24;
-  rep.at(0, a.total_raw);
-  while (blocks_left > 0) {
-    if (rep.cancelled()) throw Cancelled();
-    const double t_batch = zero_now();
-    const size_t nb = (size_t)std::min<uint64_t>(per_batch, blocks_left);
-    // the batch's block headers and payloads, read into comp
-    comp.clear();
-    ins.clear();
-    crcs.clear();
-    std::vector<size_t> offs;
+  // Three things at once: the next batch is read ahead, the GPU decodes this one, and the one before is checked and written.
+  // The GPU does not wait for the disk or for checksums. Each runs on its own thread, one at a time, so the file order holds.
+  struct Batch {
+    std::vector<uint8_t> comp;
+    std::vector<BlockIn> ins;
+    std::vector<uint32_t> crcs;
     size_t raw_total = 0;
+  };
+  uint64_t done = 0, unread = a.n_blocks, undecoded = a.n_blocks;
+  uint64_t pos = 24;
+  const auto read_batch = [&](Batch& t, size_t nb) {
+    const double t_batch = zero_now();
+    t.comp.clear();
+    t.ins.clear();
+    t.crcs.clear();
+    t.raw_total = 0;
+    std::vector<size_t> offs;
     for (size_t b = 0; b < nb; ++b) {
       uint8_t h[16];
       if (fread(h, 1, 16, f) != 16) throw zb::Error("archive damaged: block header cut");
@@ -570,38 +575,63 @@ inline ExtractStats read_blocks(const std::string& path, Codec& codec, Report& r
       in.method = h[8];
       if (in.raw_len > B || (in.method == 0 && in.comp_len != in.raw_len) || in.method > 1) throw zb::Error("archive damaged: block header");
       if (pos + in.comp_len > a.table_off) throw zb::Error("archive damaged: block past the table");
-      offs.push_back(comp.size());
-      comp.resize(comp.size() + in.comp_len);
-      if (fread(comp.data() + offs.back(), 1, in.comp_len, f) != in.comp_len) throw zb::Error("archive damaged: block cut");
+      offs.push_back(t.comp.size());
+      t.comp.resize(t.comp.size() + in.comp_len);
+      if (fread(t.comp.data() + offs.back(), 1, in.comp_len, f) != in.comp_len) throw zb::Error("archive damaged: block cut");
       pos += in.comp_len;
-      crcs.push_back(zb::get32(h + 12));
-      raw_total += in.raw_len;
-      st.compressed += in.comp_len;
-      ins.push_back(in);
+      t.crcs.push_back(zb::get32(h + 12));
+      t.raw_total += in.raw_len;
+      t.ins.push_back(in);
     }
-    for (size_t b = 0; b < nb; ++b) ins[b].data = comp.data() + offs[b];
+    for (size_t b = 0; b < nb; ++b) t.ins[b].data = t.comp.data() + offs[b];
+    IoProfile::get().read += zero_now() - t_batch;
+  };
+  rep.at(0, a.total_raw);
+  Batch batches[2];  // (the one being read must stay where it is: they take turns, nothing is swapped)
+  int at = 0;
+  std::future<void> reading, writing;
+  const auto take = [&](Batch& t) {
+    const size_t nb = (size_t)std::min<uint64_t>(per_batch, unread);
+    unread -= nb;
+    return std::async(std::launch::async, read_batch, std::ref(t), nb);
+  };
+  if (unread) reading = take(batches[at]);
+  while (undecoded > 0) {
+    if (rep.cancelled()) throw Cancelled();
+    reading.get();
+    if (unread) reading = take(batches[at ^ 1]);
+    Batch& cur = batches[at];
+    const size_t nb = cur.ins.size();
+    uint64_t comp_bytes = 0;
+    std::vector<uint32_t> raw_lens(nb);
+    for (size_t b = 0; b < nb; ++b) { comp_bytes += cur.ins[b].comp_len; raw_lens[b] = cur.ins[b].raw_len; }
     const double c0 = zero_now();
-    IoProfile::get().read += c0 - t_batch;
-    const uint8_t* raw = codec.decompress(ins);
+    const uint8_t* raw = codec.decompress(cur.ins);
     st.codec_seconds += zero_now() - c0;
-    const double c1 = zero_now();
-    std::vector<size_t> raw_off(nb);
-    for (size_t b = 0, o = 0; b < nb; o += ins[b].raw_len, ++b) raw_off[b] = o;
-    std::vector<uint8_t> crc_ok(nb);
-    parallel_for(nb, [&](size_t b) { crc_ok[b] = crc32::of(raw + raw_off[b], ins[b].raw_len) == crcs[b]; });
-    for (size_t b = 0; b < nb; ++b) {
-      if (!crc_ok[b]) {
-        st.verified = false;
-        throw zb::Error("block " + std::to_string(st.blocks + b) + " does not match its checksum: the archive is damaged");
+    st.compressed += comp_bytes;
+    if (writing.valid()) writing.get();
+    writing = std::async(std::launch::async, [&, raw, nb, raw_total = cur.raw_total, crcs = cur.crcs, raw_lens = std::move(raw_lens)] {
+      const double c1 = zero_now();
+      std::vector<size_t> raw_off(nb);
+      for (size_t b = 0, o = 0; b < nb; o += raw_lens[b], ++b) raw_off[b] = o;
+      std::vector<uint8_t> crc_ok(nb);
+      parallel_for(nb, [&](size_t b) { crc_ok[b] = crc32::of(raw + raw_off[b], raw_lens[b]) == crcs[b]; });
+      for (size_t b = 0; b < nb; ++b) {
+        if (!crc_ok[b]) {
+          st.verified = false;
+          throw zb::Error("block " + std::to_string(st.blocks + b) + " does not match its checksum: the archive is damaged");
+        }
       }
-    }
-    IoProfile::get().crc_blocks += zero_now() - c1;
-    sink(raw, raw_total);
-    done += raw_total;
-    blocks_left -= nb;
-    st.blocks += nb;
-    rep.at(done, a.total_raw);
+      IoProfile::get().crc_blocks += zero_now() - c1;
+      sink(raw, raw_total);
+      done += raw_total;
+      st.blocks += nb;
+      rep.at(done, a.total_raw);
+    });
+    undecoded -= nb;
+    at ^= 1;
   }
+  if (writing.valid()) writing.get();
   if (done != a.total_raw) throw zb::Error("archive damaged: the blocks hold " + std::to_string(done) + " bytes, the table " + std::to_string(a.total_raw));
   st.raw = done;
   st.seconds = zero_now() - t0;
