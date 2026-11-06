@@ -1,0 +1,5 @@
+bin/
+src/kernels_gen.h
+*.obj
+*.zero
+.venv/
