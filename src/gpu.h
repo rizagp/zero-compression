@@ -20,7 +20,8 @@ struct Error : std::runtime_error {
 inline void check(ze_result_t r, const char* what) {
   if (r != ZE_RESULT_SUCCESS) {
     char b[256];
-    snprintf(b, sizeof b, "Level Zero error 0x%x in %s", r, what);
+    if ((uint32_t)r == 0x70000001u) snprintf(b, sizeof b, "the GPU was reset (device lost, Level Zero error 0x70000001 in %s)", what);
+    else snprintf(b, sizeof b, "Level Zero error 0x%x in %s", r, what);
     throw Error(b);
   }
 }
@@ -191,6 +192,8 @@ struct Device {
   ~Device() { close(); }
 
   void sync() { ZE_OK(zeCommandListHostSynchronize(cl, UINT64_MAX)); }
+  // the same for destructors, which must not throw: a lost device has nothing left to wait for
+  void wait_quiet() noexcept { if (cl) zeCommandListHostSynchronize(cl, UINT64_MAX); }
 
   void* alloc_device(size_t n) {
     ze_device_mem_alloc_desc_t dd{ZE_STYPE_DEVICE_MEM_ALLOC_DESC, nullptr, 0, 0};
@@ -207,7 +210,7 @@ struct Device {
   }
   void free_device(void* p, size_t n) {
     if (!p) return;
-    sync();
+    wait_quiet();
     zeMemFree(ctx, p);
     allocated -= n;
   }
@@ -251,24 +254,39 @@ struct Device {
   }
 };
 
-// a device buffer, freed with its scope
+// a GPU buffer, freed with its scope: device memory, or host memory the GPU reads and writes directly (an iGPU's RAM
+// is the CPU's, so host memory saves the copies)
 struct Buffer {
   Device* d = nullptr;
   char* p = nullptr;
   size_t n = 0;
+  bool host = false;
   Buffer() = default;
   Buffer(Device& dev, size_t bytes) { alloc(dev, bytes); }
   Buffer(const Buffer&) = delete;
   Buffer& operator=(const Buffer&) = delete;
-  Buffer(Buffer&& o) noexcept : d(o.d), p(o.p), n(o.n) { o.p = nullptr; o.n = 0; }
-  Buffer& operator=(Buffer&& o) noexcept { release(); d = o.d; p = o.p; n = o.n; o.p = nullptr; o.n = 0; return *this; }
+  Buffer(Buffer&& o) noexcept : d(o.d), p(o.p), n(o.n), host(o.host) { o.p = nullptr; o.n = 0; }
+  Buffer& operator=(Buffer&& o) noexcept { release(); d = o.d; p = o.p; n = o.n; host = o.host; o.p = nullptr; o.n = 0; return *this; }
   ~Buffer() { release(); }
   void alloc(Device& dev, size_t bytes) { release(); d = &dev; n = bytes; p = (char*)dev.alloc_device(bytes); }
-  void release() { if (p && d) d->free_device(p, n); p = nullptr; n = 0; }
+  void alloc_host(Device& dev, size_t bytes) { release(); d = &dev; n = bytes; host = true; p = (char*)dev.alloc_host(bytes); }
+  void release() {
+    if (p && d) {
+      if (host) { d->wait_quiet(); zeMemFree(d->ctx, p); }
+      else d->free_device(p, n);
+    }
+    p = nullptr; n = 0; host = false;
+  }
   // grows when smaller than bytes (the old contents are lost)
   void reserve(Device& dev, size_t bytes) { if (bytes > n) alloc(dev, bytes); }
-  void write(const void* src, size_t bytes, size_t off = 0) { d->write(p + off, src, bytes); }
-  void read(void* dst, size_t bytes, size_t off = 0) { d->read(dst, p + off, bytes); }
+  void write(const void* src, size_t bytes, size_t off = 0) {
+    if (host) { d->sync(); if (bytes) memcpy(p + off, src, bytes); }
+    else d->write(p + off, src, bytes);
+  }
+  void read(void* dst, size_t bytes, size_t off = 0) {
+    if (host) { d->sync(); if (bytes) memcpy(dst, p + off, bytes); }
+    else d->read(dst, p + off, bytes);
+  }
   void zero(size_t bytes, size_t off = 0) { d->fill(p + off, 0, bytes); }
   const char* ptr(size_t off = 0) const { return p + off; }
 };
@@ -360,13 +378,29 @@ struct Kernel {
   uint32_t gx = 0, gy = 0, gz = 0;
   Kernel() = default;
   Kernel(const Kernel&) = delete;
-  ~Kernel() { if (k) zeKernelDestroy(k); }
+  ~Kernel() { release(); }
+  // (the group size belongs to the kernel object: a new one has none, whatever the last launch of the old one used)
+  void release() {
+    if (k) zeKernelDestroy(k);
+    k = nullptr;
+    gx = gy = gz = 0;
+  }
   void create(Program& p, const char* kname) {
+    release();
     d = p.d;
     name = kname;
     ze_kernel_desc_t kd{ZE_STYPE_KERNEL_DESC, nullptr, 0, kname};
     const ze_result_t r = zeKernelCreate(p.m, &kd, &k);
     if (r != ZE_RESULT_SUCCESS) throw Error(std::string("zeKernelCreate(") + kname + ") failed");
+    // ZERO_KPROPS=1: each kernel's register spill, local memory and sub-group size (a spill costs memory traffic)
+    static const bool kprops = getenv("ZERO_KPROPS") && atoi(getenv("ZERO_KPROPS")) != 0;
+    if (kprops) {
+      ze_kernel_properties_t kp{};
+      kp.stype = (decltype(kp.stype))0x1e;
+      if (zeKernelGetProperties(k, &kp) == ZE_RESULT_SUCCESS)
+        fprintf(stderr, "[kernel] %-14s spill %u private %u local %u simd %u\n", kname, kp.spillMemSize, kp.privateMemSize,
+                kp.localMemSize, kp.maxSubgroupSize);
+    }
   }
   void arg(uint32_t i, const Buffer& b, size_t off = 0) {
     const char* p = b.p + off;

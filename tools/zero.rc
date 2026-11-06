@@ -1,0 +1,2 @@
+// the icon of the window and of .zero files (tools/make_icon.py draws it)
+1 ICON "zero.ico"

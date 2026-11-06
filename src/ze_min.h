@@ -79,8 +79,16 @@ struct ze_module_desc_t {
 #define ZE_MODULE_FORMAT_NATIVE 1u
 struct ze_kernel_desc_t { ze_structure_type_t stype; const void* pNext; uint32_t flags; const char* pKernelName; };
 struct ze_group_count_t { uint32_t groupCountX, groupCountY, groupCountZ; };
+struct ze_kernel_properties_t {  // (stype 0x1e)
+  ze_structure_type_t stype;
+  void* pNext;
+  uint32_t numKernelArgs, requiredGroupSize[3], requiredNumSubGroups, requiredSubgroupSize, maxSubgroupSize,
+      maxNumSubgroups, localMemSize, privateMemSize, spillMemSize;
+  uint8_t uuid[32];
+};
 
 #define ZE_FUNCS(X)                                                                                              \
+  X(ze_result_t, zeKernelGetProperties, (ze_kernel_handle_t, ze_kernel_properties_t*))                           \
   X(ze_result_t, zeInit, (uint32_t))                                                                             \
   X(ze_result_t, zeDriverGet, (uint32_t*, ze_driver_handle_t*))                                                  \
   X(ze_result_t, zeDeviceGet, (ze_driver_handle_t, uint32_t*, ze_device_handle_t*))                              \

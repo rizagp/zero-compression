@@ -10,6 +10,7 @@
 // The files' bytes, in entry order, form one "solid" stream that is cut into blocks of 2^block_log bytes: many
 // small files share blocks, and every block decompresses on its own.
 #pragma once
+#include <future>
 #include "codec.h"
 #include "crc32.h"
 #include "platform.h"
@@ -270,6 +271,17 @@ inline int64_t ztell(FILE* f) {
 }
 
 // Reads the entries' bytes in order, delivering batches of up to `batch` bytes, and the CRC of each file.
+// a running CRC over a large piece, on all the CPU's threads: the GPU would otherwise wait for one thread's checksum
+inline uint32_t crc_update_mt(uint32_t crc, const uint8_t* p, size_t n) {
+  const size_t CH = (size_t)1 << 20;
+  if (n < 4 * CH) return crc32::update(crc, p, n);
+  const size_t pieces = (n + CH - 1) / CH;
+  std::vector<uint32_t> c(pieces);
+  parallel_for(pieces, [&](size_t i) { c[i] = crc32::of(p + i * CH, std::min(CH, n - i * CH)); });
+  for (size_t i = 0; i < pieces; ++i) crc = crc32::combine(crc, c[i], std::min(CH, n - i * CH));
+  return crc;
+}
+
 struct SolidReader {
   std::vector<Entry>& es;
   size_t idx = 0;        // the entry being read
@@ -301,7 +313,7 @@ struct SolidReader {
         // the file shrank while being read: the rest is zeros, so the archive stays consistent with its table
         memset(buf + got + r, 0, want - r);
       }
-      crc = crc32::update(crc, buf + got, want);
+      crc = crc_update_mt(crc, buf + got, want);
       got += want;
       pos += want;
     }
@@ -328,7 +340,12 @@ inline CompressStats compress_archive(const std::vector<std::string>& inputs, co
   const fs::path outp = zero_path(out_path);
   FILE* f = open_file(outp, "wb");
   if (!f) throw zb::Error("cannot create " + out_path);
-  struct Closer { FILE* f; ~Closer() { if (f) fclose(f); } } closer{f};
+  // (an archive left unfinished by an error or Cancel is removed: it could only fail later)
+  struct Closer {
+    FILE* f;
+    fs::path p;
+    ~Closer() { if (f) { fclose(f); std::error_code ec; fs::remove(p, ec); } }
+  } closer{f, outp};
   const size_t B = (size_t)1 << block_log;
   const uint64_t n_blocks = (total + B - 1) / B;
   // header
@@ -342,22 +359,33 @@ inline CompressStats compress_archive(const std::vector<std::string>& inputs, co
   size_t batch = codec.batch_bytes(block_log);
   batch = (batch / B) * B;
   if (batch < B) batch = B;
-  std::vector<uint8_t> buf(batch);
+  std::vector<uint8_t> buf(batch), next_buf;
+  std::vector<uint32_t> crcs, next_crcs;
   SolidReader reader(es);
   uint64_t done = 0;
   std::vector<BlockOut> outs;
   rep.at(0, total);
-  while (done < total) {
+  const auto fill = [&reader, batch, B](std::vector<uint8_t>& b, std::vector<uint32_t>& c, uint64_t left) {
+    if (b.size() < batch) b.resize(batch);
+    const size_t n = reader.read(b.data(), std::min<uint64_t>(batch, left));
+    c.resize((n + B - 1) / B);
+    parallel_for(c.size(), [&](size_t i) { c[i] = crc32::of(b.data() + i * B, std::min(B, n - i * B)); });
+    return n;
+  };
+  size_t n = fill(buf, crcs, total);
+  uint64_t queued = n;
+  while (n) {
     if (rep.cancelled()) throw Cancelled();
-    const size_t n = reader.read(buf.data(), std::min<uint64_t>(batch, total - done));
-    if (!n) break;
+    // the next batch is read and checksummed while the GPU works on this one
+    std::future<size_t> ahead;
+    if (queued < total) ahead = std::async(std::launch::async, fill, std::ref(next_buf), std::ref(next_crcs), total - queued);
     const double c0 = zero_now();
     codec.compress(buf.data(), n, block_log, outs);
     st.codec_seconds += zero_now() - c0;
     for (size_t b = 0; b < outs.size(); ++b) {
       const size_t off = b * B;
       const uint32_t len = (uint32_t)std::min(B, n - off);
-      const uint32_t crc = crc32::of(buf.data() + off, len);
+      const uint32_t crc = crcs[b];
       const BlockOut& o = outs[b];
       const bool stored = o.method == 0 || o.data.size() >= len;
       w32(f, len);
@@ -371,6 +399,13 @@ inline CompressStats compress_archive(const std::vector<std::string>& inputs, co
     }
     done += n;
     rep.at(done, total);
+    n = 0;
+    if (ahead.valid()) {
+      n = ahead.get();
+      queued += n;
+      buf.swap(next_buf);
+      crcs.swap(next_crcs);
+    }
   }
   reader.finish();
   // table
@@ -482,6 +517,11 @@ inline bool safe_name(const std::string& n) {
   return true;
 }
 
+// ZERO_PROFILE=1: where extraction's wall time goes
+struct IoProfile {
+  double read = 0, crc_blocks = 0, fwrite = 0, crc_file = 0, close = 0, mtime = 0, open = 0;
+  static IoProfile& get() { static IoProfile p; return p; }
+};
 struct ExtractStats {
   uint64_t raw = 0, compressed = 0, blocks = 0;
   size_t files = 0, folders = 0;
@@ -512,6 +552,7 @@ inline ExtractStats read_blocks(const std::string& path, Codec& codec, Report& r
   rep.at(0, a.total_raw);
   while (blocks_left > 0) {
     if (rep.cancelled()) throw Cancelled();
+    const double t_batch = zero_now();
     const size_t nb = (size_t)std::min<uint64_t>(per_batch, blocks_left);
     // the batch's block headers and payloads, read into comp
     comp.clear();
@@ -540,16 +581,21 @@ inline ExtractStats read_blocks(const std::string& path, Codec& codec, Report& r
     }
     for (size_t b = 0; b < nb; ++b) ins[b].data = comp.data() + offs[b];
     const double c0 = zero_now();
+    IoProfile::get().read += c0 - t_batch;
     const uint8_t* raw = codec.decompress(ins);
     st.codec_seconds += zero_now() - c0;
-    size_t o = 0;
+    const double c1 = zero_now();
+    std::vector<size_t> raw_off(nb);
+    for (size_t b = 0, o = 0; b < nb; o += ins[b].raw_len, ++b) raw_off[b] = o;
+    std::vector<uint8_t> crc_ok(nb);
+    parallel_for(nb, [&](size_t b) { crc_ok[b] = crc32::of(raw + raw_off[b], ins[b].raw_len) == crcs[b]; });
     for (size_t b = 0; b < nb; ++b) {
-      if (crc32::of(raw + o, ins[b].raw_len) != crcs[b]) {
+      if (!crc_ok[b]) {
         st.verified = false;
         throw zb::Error("block " + std::to_string(st.blocks + b) + " does not match its checksum: the archive is damaged");
       }
-      o += ins[b].raw_len;
     }
+    IoProfile::get().crc_blocks += zero_now() - c1;
     sink(raw, raw_total);
     done += raw_total;
     blocks_left -= nb;
@@ -572,23 +618,33 @@ struct SolidWriter {
   uint32_t crc = 0;
   Report& rep;
   size_t files = 0, folders = 0;
+  fs::path last_parent;
   SolidWriter(const std::vector<Entry>& e, const fs::path& r, Report& rp) : es(e), root(r), rep(rp) {}
   ~SolidWriter() { if (f) fclose(f); }
   void open_next() {
     const Entry& e = es[idx];
     if (!safe_name(e.name)) throw zb::Error("refused: unsafe name in the archive: " + e.name);
     const fs::path p = root / fs::path(e.name);
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
+    const double t0 = zero_now();
+    if (p.parent_path() != last_parent) {  // (a folder is checked once, not again for every file in it)
+      std::error_code ec;
+      fs::create_directories(p.parent_path(), ec);
+      last_parent = p.parent_path();
+    }
     f = open_file(p, "wb");
+    IoProfile::get().open += zero_now() - t0;
     if (!f) throw zb::Error("cannot create " + zero_utf8(p));
     ++files;
   }
   void finish_file() {
     const Entry& e = es[idx];
+    const double t0 = zero_now();
     if (f) { fclose(f); f = nullptr; }
+    const double t1 = zero_now();
+    IoProfile::get().close += t1 - t0;
     if (!e.dir && crc != e.crc && e.size > 0) throw zb::Error("file " + e.name + " does not match its checksum");
     set_mtime(root / fs::path(e.name), e.mtime);
+    IoProfile::get().mtime += zero_now() - t1;
     crc = 0;
   }
   // advances over folders and empty files
@@ -615,8 +671,12 @@ struct SolidWriter {
       const Entry& e = es[idx];
       if (!f) open_next();
       const size_t want = (size_t)std::min<uint64_t>(n, e.size - pos);
+      const double t0 = zero_now();
       if (fwrite(p, 1, want, f) != want) throw zb::Error("writing " + e.name + " failed (disk full?)");
-      crc = crc32::update(crc, p, want);
+      const double t1 = zero_now();
+      crc = crc_update_mt(crc, p, want);
+      IoProfile::get().fwrite += t1 - t0;
+      IoProfile::get().crc_file += zero_now() - t1;
       p += want;
       n -= want;
       pos += want;
@@ -643,6 +703,11 @@ inline ExtractStats extract_archive(const std::string& path, const std::string& 
   });
   if (!w) w = std::make_unique<SolidWriter>(a.entries, root, rep);
   w->close();
+  if (getenv("ZERO_PROFILE")) {
+    const IoProfile& q = IoProfile::get();
+    fprintf(stderr, "[profile] extract (s): read %.3f codec %.3f crc-blocks %.3f open %.3f fwrite %.3f crc-file %.3f close %.3f mtime %.3f\n",
+            q.read, st.codec_seconds, q.crc_blocks, q.open, q.fwrite, q.crc_file, q.close, q.mtime);
+  }
   st.files = w->files;
   st.folders = w->folders;
   return st;
@@ -676,7 +741,7 @@ inline ExtractStats test_archive(const std::string& path, Codec& codec, Report& 
       if (idx >= a.entries.size()) throw zb::Error("archive damaged: more data than the table lists");
       const Entry& e = a.entries[idx];
       const size_t want = (size_t)std::min<uint64_t>(n, e.size - pos);
-      crc = crc32::update(crc, p, want);
+      crc = crc_update_mt(crc, p, want);
       p += want;
       n -= want;
       pos += want;

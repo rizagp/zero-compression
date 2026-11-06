@@ -293,6 +293,10 @@ struct App {
         summary = "Cancelled.";
       } catch (const std::exception& e) {
         summary = std::string("Error: ") + e.what();
+        // a lost device stays lost for this process (measured: opening it again fails to build kernels), so the jobs
+        // after it say so and use the CPU
+        gpu.reset();
+        if (strstr(e.what(), "device lost")) gpu_error = "the GPU was reset; reopen the window to use it again";
       }
       on_gtk_thread([this, summary] {
         set_busy(false);

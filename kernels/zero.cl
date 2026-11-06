@@ -24,9 +24,13 @@
 #define RANS_L (1u << 23)
 #define SCALE 4096u
 
-inline uint hash4(__global const uchar* p) {
-  const uint v = (uint)p[0] | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
-  return (v * 2654435761u) >> (32 - HBITS);
+// 4 bytes at any byte position of a block, from the 4-byte-aligned words around it (blocks start 4-aligned and
+// the input buffer has 16 bytes of slack past its end). One or two word loads instead of four byte loads.
+inline uint load4u(__global const uchar* base, uint pos) {
+  __global const uint* w = (__global const uint*)base;
+  const uint i = pos >> 2, s = (pos & 3u) * 8u;
+  const uint lo = w[i];
+  return s == 0 ? lo : ((lo >> s) | (w[i + 1] << (32u - s)));
 }
 inline uint get32g(__global const uchar* p) { return (uint)p[0] | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24); }
 inline uint get16g(__global const uchar* p) { return (uint)p[0] | ((uint)p[1] << 8); }
@@ -43,7 +47,7 @@ __kernel void k_hash_count(__global const uchar* in, __global uint* hcount, uint
   if (b >= nb) return;
   const uint p = gid & (B - 1);
   if (p + 4 > block_len(b, nb, nlast)) return;
-  atomic_inc(&hcount[b * HB + hash4(in + gid)]);
+  atomic_inc(&hcount[b * HB + ((load4u(in, gid) * 2654435761u) >> (32 - HBITS))]);
 }
 
 // 2. bucket starts: an exclusive scan of the block's bucket counts (one work-group per block); hfill zeroed
@@ -68,29 +72,25 @@ __kernel void k_bucket_scan(__global const uint* hcount, __global uint* bstart, 
   for (uint i = k * per; i < (k + 1) * per; ++i) { bs[i] = run; run += hc[i]; hf[i] = 0; }
 }
 
-// 3. positions grouped by bucket: srt holds each bucket's positions one after the other (in roughly position
-//    order: the work-groups run about in order), idx[p] where p landed
+// 3. positions grouped by bucket: srt holds each bucket's positions one after the other, each with 12 more bits of
+//    its hash in the top bits. The order inside a bucket is the order the lanes reach the counter, roughly position
+//    order, and the closer the better: the neighbours are then the nearest earlier positions. 16 lanes and byte
+//    loads keep it closer than 32 lanes and word loads, whatever the cause (measured: ratio 24.4 -> 23.7 %, the
+//    kernel 6.5 -> 8.3 ms per 16 MiB; more match candidates buy less per ms), so this kernel reads bytes on purpose.
+__attribute__((intel_reqd_sub_group_size(16)))
 __kernel void k_scatter(__global const uchar* in, __global const uint* bstart, __global uint* hfill, __global uint* srt,
-                        __global uint* idx, uint nb, uint nlast) {
+                        uint nb, uint nlast) {
   const uint gid = get_global_id(0);
   const uint b = gid >> BLOG;
   if (b >= nb) return;
   const uint p = gid & (B - 1);
   if (p + 4 > block_len(b, nb, nlast)) return;
-  const uint h = b * HB + hash4(in + gid);
+  const uint hv = get32g(in + gid) * 2654435761u;
+  const uint h = b * HB + (hv >> (32 - HBITS));
   const uint slot = bstart[h] + atomic_inc(&hfill[h]);
-  srt[((size_t)b << BLOG) + slot] = p;
-  idx[gid] = slot;
+  srt[((size_t)b << BLOG) + slot] = p | (((hv >> (32 - HBITS - 12)) & 0xFFFu) << 20);
 }
 
-// 4 bytes at any byte position of a block, from the 4-byte-aligned words around it (blocks start 4-aligned and
-// the input buffer has 16 bytes of slack past its end). One or two word loads instead of four byte loads.
-inline uint load4u(__global const uchar* base, uint pos) {
-  __global const uint* w = (__global const uint*)base;
-  const uint i = pos >> 2, s = (pos & 3u) * 8u;
-  const uint lo = w[i];
-  return s == 0 ? lo : ((lo >> s) | (w[i + 1] << (32u - s)));
-}
 // the common prefix of the bytes at a and at b, up to maxlen, 4 bytes a step
 inline uint match_len(__global const uchar* base, uint a, uint b, uint maxlen) {
   uint l = 0;
@@ -111,55 +111,90 @@ inline uint match_len(__global const uchar* base, uint a, uint b, uint maxlen) {
 #define NCANDL 8u  // bucket neighbours checked before the position in srt (mostly earlier positions)
 #endif
 #ifndef NCANDR
-#define NCANDR 8u  // and after it
+#define NCANDR 2u  // and after it
 #endif
-#ifndef GOOD
-#define GOOD 274u  // a match this long ends the search
+#ifndef LENCAP
+#define LENCAP 16u  // the match finder compares this far; k_parse finishes the matches the chain really uses
 #endif
+#define NCAND (NCANDL + NCANDR)
 
-// 4. the best match at every position among its bucket neighbours in srt (NCAND on each side, earlier positions
-//    only): the longest, the nearest on a tie; match[i] = (len << 20) | (dist - 1), or 0 when shorter than MINMATCH
-__kernel void k_match(__global const uchar* in, __global const uint* hcount, __global const uint* bstart, __global const uint* srt,
-                      __global const uint* idx, __global uint* match, uint nb, uint nlast) {
+// 4. the best match of every position among its neighbours in srt (the longest up to LENCAP, the nearest on a tie);
+//    match[p] = (len << 20) | (dist - 1), or 0 when shorter than MINMATCH. It walks srt, not the positions: the
+//    neighbours are then consecutive memory, and the bucket table and an index by position are not needed. A
+//    neighbour with another tag, or at a later position, costs no read of the data, and every candidate's first 4
+//    bytes are requested before any is looked at (loads in flight together, not one latency each; the compiler keeps
+//    source order). The cost is what remains: comparing, so a long match is not compared from each of its positions.
+__kernel void k_match(__global const uchar* in, __global const uint* srt, __global uint* match, uint nb, uint nlast) {
   const uint gid = get_global_id(0);
   const uint b = gid >> BLOG;
   if (b >= nb) return;
-  const uint p = gid & (B - 1);
   const uint n = block_len(b, nb, nlast);
-  if (p >= n) return;
+  const uint count = n >= MINMATCH ? n - (MINMATCH - 1) : 0u;  // positions in srt
+  const uint i = gid & (B - 1);
+  if (i >= n) return;
+  if (i >= count) { match[gid] = 0; return; }  // (the last positions of a block are not in srt: exactly these slots)
   __global const uchar* base = in + ((size_t)b << BLOG);
+  __global const uint* sb = srt + ((size_t)b << BLOG);
+  const uint e = sb[i];
+  const uint p = e & 0xFFFFFu;
+  uint jc[NCAND], any = 0, nc = 0;
+  for (uint k = 1; k <= max(NCANDL, NCANDR); ++k) {
+    if (k <= NCANDL) {
+      const uint c = i >= k ? sb[i - k] : ~e;
+      const uint j = c & 0xFFFFFu;
+      const uint ok = ((c ^ e) >> 20) == 0 && j < p;
+      jc[nc++] = ok ? j : p;
+      any |= ok;
+    }
+    if (k <= NCANDR) {
+      const uint c = i + k < count ? sb[i + k] : ~e;
+      const uint j = c & 0xFFFFFu;
+      const uint ok = ((c ^ e) >> 20) == 0 && j < p;
+      jc[nc++] = ok ? j : p;
+      any |= ok;
+    }
+  }
   uint best = 0, bestd = 0;
-  if (p + MINMATCH <= n) {
-    const uint h = b * HB + hash4(base + p);
-    const uint lo = bstart[h], hi = lo + hcount[h];
-    const uint i = idx[gid];
-    __global const uint* sb = srt + ((size_t)b << BLOG);
-    const uint maxlen = min(MAXMATCH, n - p);
-    const uint pw = load4u(base, p);  // a match needs these 4 bytes: candidates without them cost one load
+  if (any) {
+    __global const uint* w = (__global const uint*)base;
+    uint w0[NCAND], w1[NCAND];
+    const uint pw0 = w[p >> 2], pw1 = w[(p >> 2) + 1];
+    for (uint m = 0; m < NCAND; ++m) w0[m] = w[jc[m] >> 2];
+    for (uint m = 0; m < NCAND; ++m) w1[m] = w[(jc[m] >> 2) + 1];
+    const uint ps = (p & 3u) * 8u;
+    const uint pw = ps == 0 ? pw0 : ((pw0 >> ps) | (pw1 << (32u - ps)));
+    const uint maxlen = min(LENCAP, n - p);
     if (p > 0 && load4u(base, p - 1) == pw) {  // the byte before: a run of one value costs no offset bits
       best = 4 + match_len(base, p + 3, p + 4, maxlen - 4);
       bestd = 1;
     }
-    const uint good = min(GOOD, maxlen);
-    for (uint k = 1; k <= max(NCANDL, NCANDR) && best < good; ++k) {
-      for (uint side = 0; side < 2; ++side) {
-        uint q;
-        if (side == 0) { if (k > NCANDL || i < lo + k) continue; q = i - k; }
-        else { if (k > NCANDR || i + k >= hi) continue; q = i + k; }
-        const uint j = sb[q];
-        if (j >= p || load4u(base, j) != pw) continue;
-        if (best >= 4 && base[j + best] != base[p + best]) continue;
-        const uint l = 4 + match_len(base, j + 4, p + 4, maxlen - 4);
-        const uint d = p - j;
-        if (l > best || (l == best && d < bestd)) { best = l; bestd = d; }
-      }
+    for (uint m = 0; m < NCAND && best < maxlen; ++m) {
+      const uint j = jc[m];
+      const uint sh = (j & 3u) * 8u;
+      const uint x = sh == 0 ? w0[m] : ((w0[m] >> sh) | (w1[m] << (32u - sh)));
+      if (j == p || x != pw) continue;
+      if (best >= 4 && base[j + best] != base[p + best]) continue;
+      const uint l = 4 + match_len(base, j + 4, p + 4, maxlen - 4);
+      const uint d = p - j;
+      if (l > best || (l == best && d < bestd)) { best = l; bestd = d; }
     }
   }
-  match[gid] = best >= MINMATCH ? ((best << 20) | (bestd - 1)) : 0u;
+  match[((size_t)b << BLOG) + p] = best >= MINMATCH ? ((best << 20) | (bestd - 1)) : 0u;
 }
 
-inline uint nextpos(__global const uint* m, uint p) {
-  const uint l = m[p] >> 20;
+// the position after the token at p. The match finder stops comparing at LENCAP bytes (a long match would otherwise
+// be compared again from every one of its positions); the few positions the chain really visits finish it here.
+inline uint nextpos(__global uint* m, __global const uchar* base, uint n, uint p) {
+  const uint v = m[p];
+  uint l = v >> 20;
+  if (l == LENCAP) {
+    const uint maxlen = min(MAXMATCH, n - p);
+    if (maxlen > l) {
+      const uint j = p - (v & 0xFFFFFu) - 1u;
+      const uint x = l + match_len(base, j + l, p + l, maxlen - l);
+      if (x != l) { m[p] = (x << 20) | (v & 0xFFFFFu); l = x; }
+    }
+  }
   return p + (l ? l : 1u);
 }
 
@@ -168,18 +203,19 @@ inline uint nextpos(__global const uint* m, uint p) {
 //    true chain through the segments: where it meets a tentative walk the two coincide from there on, so only the
 //    tentative prefix is undone; where it never meets one the tentative walk is undone whole. (Greedy parses
 //    re-synchronize within a few tokens on ordinary data, so the sequential part is short.) `mark` starts zeroed.
-__kernel void k_parse(__global const uint* match, __global uchar* mark, uint nb, uint nlast) {
+__kernel void k_parse(__global uint* match, __global uchar* mark, uint nb, uint nlast, __global const uchar* in) {
   const uint b = get_group_id(0);
   const uint k = get_local_id(0);
   const uint n = block_len(b, nb, nlast);
-  __global const uint* m = match + ((size_t)b << BLOG);
+  __global uint* m = match + ((size_t)b << BLOG);
+  __global const uchar* base = in + ((size_t)b << BLOG);
   __global uchar* mk = mark + ((size_t)b << BLOG);
   __local uint ex[G];
   uint s = k * SEG;
   uint send = min(s + SEG, n);
   uint p = s;
   if (s < n)
-    while (p < send) { mk[p] = 1; p = nextpos(m, p); }
+    while (p < send) { mk[p] = 1; p = nextpos(m, base, n, p); }
   ex[k] = p;
   barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
   if (k != 0) return;
@@ -189,20 +225,20 @@ __kernel void k_parse(__global const uint* match, __global uchar* mark, uint nb,
     if (s >= n) break;
     send = min(s + SEG, n);
     if (e >= send) {  // the true chain jumps over this segment: its tentative walk is all wrong
-      for (uint r = s; r < send; r = nextpos(m, r)) if (mk[r] == 1) mk[r] = 0;
+      for (uint r = s; r < send; r = nextpos(m, base, n, r)) if (mk[r] == 1) mk[r] = 0;
       continue;
     }
     uint t = e, merged = 0, mpos = 0;
     while (t < send) {
       if (mk[t] == 1) { merged = 1; mpos = t; break; }
       mk[t] = 2;
-      t = nextpos(m, t);
+      t = nextpos(m, base, n, t);
     }
     if (merged) {
-      for (uint r = s; r != mpos; r = nextpos(m, r)) mk[r] = 0;
+      for (uint r = s; r != mpos; r = nextpos(m, base, n, r)) mk[r] = 0;
       e = ex[q];
     } else {
-      for (uint r = s; r < send; r = nextpos(m, r)) if (mk[r] == 1) mk[r] = 0;
+      for (uint r = s; r < send; r = nextpos(m, base, n, r)) if (mk[r] == 1) mk[r] = 0;
       e = t;
     }
   }

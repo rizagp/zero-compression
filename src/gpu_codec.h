@@ -17,16 +17,13 @@ struct GpuCodec : Codec {
   gpu::Kernel k_hcount, k_bscan, k_scatter, k_match, k_parse, k_tokens, k_streams, k_rans, k_pack, k_dstreams, k_dlz;
   // encoder buffers (sized for enc_nb blocks)
   size_t enc_nb = 0;
-  gpu::Buffer e_in, e_match, e_mark, e_hcount, e_bstart, e_hfill, e_srt, e_idx, e_lit, e_tokLB, e_tokM, e_tokD, e_cnt, e_tok, e_ext,
+  gpu::Buffer e_in, e_match, e_mark, e_hcount, e_bstart, e_hfill, e_srt, e_lit, e_tokLB, e_tokM, e_tokD, e_cnt, e_tok, e_ext,
       e_offsym, e_offw, e_lanes, e_freq, e_lanelen, e_sinfo, e_out, e_outlen;
   // decoder buffers (sized for dec_nb blocks)
   size_t dec_nb = 0, dec_comp_cap = 0;
   gpu::Buffer d_comp, d_boff, d_binfo, d_lit, d_tok, d_ext, d_offsym, d_cnt, d_err, d_out;
-  // the decoder writes straight into host memory: on an integrated GPU that is the same RAM, and it saves the copy
-  // back (measured: the LZ kernel 79 -> 71 ms and no download, 1275 -> 1407 MB/s)
-  static constexpr bool host_out_direct = true;
-  char* d_out_host = nullptr;
-  size_t d_out_host_n = 0;
+  // d_comp and d_out live in host memory: on an integrated GPU that is the same RAM, and it saves the copies (measured:
+  // the LZ kernel 79 -> 71 ms and no download, 1275 -> 1407 MB/s; the upload 11.3 -> 3.8 ms, +3 %)
   std::vector<uint8_t> host_out, host_comp;
   std::vector<uint32_t> host_u32;
   Report* rep = nullptr;
@@ -63,11 +60,11 @@ struct GpuCodec : Codec {
 
   int level = 5;  // 1 fast .. 9 thorough: how many bucket neighbours the match finder checks, and when it stops
   std::string name() const override { return "GPU " + dev.name; }
-  // the match finder's build options for a level: neighbours before / after the position in srt, "good enough" length
+  // the match finder's build options for a level: neighbours before / after the position in srt, bytes compared
   static std::string level_opts(int level) {
-    if (level <= 2) return "-DNCANDL=4u -DNCANDR=2u -DGOOD=32u";
-    if (level <= 6) return "-DNCANDL=8u -DNCANDR=2u -DGOOD=64u";
-    return "-DNCANDL=8u -DNCANDR=8u -DGOOD=274u";
+    if (level <= 2) return "-DNCANDL=4u -DNCANDR=2u -DLENCAP=8u";
+    if (level <= 6) return "-DNCANDL=8u -DNCANDR=2u -DLENCAP=16u";
+    return "-DNCANDL=16u -DNCANDR=4u -DLENCAP=32u";
   }
   // the encoder's batch (about 20 bytes of GPU scratch per input byte; 64 MiB measured slower end to end)
   size_t batch_bytes(uint32_t) const override { return (size_t)16 << 20; }
@@ -87,15 +84,22 @@ struct GpuCodec : Codec {
   int built_level = -1;
   void ensure_program(uint32_t block_log) {
     if (blog == block_log && prog && built_level == level) return;
+    // another block size or level in one process (a window stays open between archives): the old kernels go before
+    // the module they came from, and a build that fails leaves no program behind
+    if (prog) dev.sync();
+    for (gpu::Kernel* k : {&k_hcount, &k_bscan, &k_scatter, &k_match, &k_parse, &k_tokens, &k_streams, &k_rans, &k_pack, &k_dstreams, &k_dlz})
+      k->release();
+    prog.reset();
     blog = block_log;
     built_level = level;
-    prog = std::make_unique<gpu::Program>();
+    auto next = std::make_unique<gpu::Program>();
     std::string src((const char*)kZeroCL, kZeroCL_len);
     char opts[128];
-    // (ZERO_KOPTS: extra build options for experiments, e.g. "-DNCANDL=4u -DGOOD=64u", in place of the level's)
+    // (ZERO_KOPTS: extra build options for experiments, e.g. "-DNCANDL=4u -DLENCAP=32u", in place of the level's)
     const char* extra = getenv("ZERO_KOPTS");
     snprintf(opts, sizeof opts, "-DBLOG=%u -DG=%u %s", blog, G, extra ? extra : level_opts(level).c_str());
-    prog->build(dev, src, opts);
+    next->build(dev, src, opts);
+    prog = std::move(next);
     if (rep) {
       char b[160];
       snprintf(b, sizeof b, "kernels for %u KiB blocks %s (%.2f s)", 1u << (blog - 10), prog->from_cache ? "loaded from the cache" : "compiled",
@@ -126,7 +130,6 @@ struct GpuCodec : Codec {
     e_bstart.alloc(dev, nb * HB() * 4);
     e_hfill.alloc(dev, nb * HB() * 4);
     e_srt.alloc(dev, N * 4);
-    e_idx.alloc(dev, N * 4);
     e_lit.alloc(dev, N);
     e_tokLB.alloc(dev, nb * TCAP() * 4);
     e_tokM.alloc(dev, nb * TCAP() * 4);
@@ -167,15 +170,14 @@ struct GpuCodec : Codec {
     k_bscan.arg(0, e_hcount); k_bscan.arg(1, e_bstart); k_bscan.arg(2, e_hfill); k_bscan.arg(3, nb32);
     k_bscan.launch(nb32, G);
     stage("bscan");
-    k_scatter.arg(0, e_in); k_scatter.arg(1, e_bstart); k_scatter.arg(2, e_hfill); k_scatter.arg(3, e_srt); k_scatter.arg(4, e_idx);
-    k_scatter.arg(5, nb32); k_scatter.arg(6, nlast);
+    k_scatter.arg(0, e_in); k_scatter.arg(1, e_bstart); k_scatter.arg(2, e_hfill); k_scatter.arg(3, e_srt);
+    k_scatter.arg(4, nb32); k_scatter.arg(5, nlast);
     k_scatter.launch(pos_groups, G);
     stage("scatter");
-    k_match.arg(0, e_in); k_match.arg(1, e_hcount); k_match.arg(2, e_bstart); k_match.arg(3, e_srt); k_match.arg(4, e_idx);
-    k_match.arg(5, e_match); k_match.arg(6, nb32); k_match.arg(7, nlast);
+    k_match.arg(0, e_in); k_match.arg(1, e_srt); k_match.arg(2, e_match); k_match.arg(3, nb32); k_match.arg(4, nlast);
     k_match.launch(pos_groups, G);
     stage("match");
-    k_parse.arg(0, e_match); k_parse.arg(1, e_mark); k_parse.arg(2, nb32); k_parse.arg(3, nlast);
+    k_parse.arg(0, e_match); k_parse.arg(1, e_mark); k_parse.arg(2, nb32); k_parse.arg(3, nlast); k_parse.arg(4, e_in);
     k_parse.launch(nb32, G);
     stage("parse");
     k_tokens.arg(0, e_in); k_tokens.arg(1, e_match); k_tokens.arg(2, e_mark); k_tokens.arg(3, e_lit); k_tokens.arg(4, e_tokLB);
@@ -228,17 +230,11 @@ struct GpuCodec : Codec {
       d_offsym.alloc(dev, nb * TCAP() + 4096);
       d_cnt.alloc(dev, nb * 8 * 4);
       d_err.alloc(dev, nb * 4);
-      if (host_out_direct) {
-        if (d_out_host) { dev.sync(); zeMemFree(dev.ctx, d_out_host); }
-        d_out_host_n = nb * B();
-        d_out_host = (char*)dev.alloc_host(d_out_host_n);
-      } else {
-        d_out.alloc(dev, nb * B());
-      }
+      d_out.alloc_host(dev, nb * B());
       dec_nb = nb;
     }
     if (comp_bytes > dec_comp_cap) {
-      d_comp.alloc(dev, comp_bytes + 4096);
+      d_comp.alloc_host(dev, comp_bytes + 4096);
       dec_comp_cap = comp_bytes + 4096;
     }
   }
@@ -285,26 +281,17 @@ struct GpuCodec : Codec {
     stage("rans");
     k_dlz.arg(0, d_comp); k_dlz.arg(1, d_boff); k_dlz.arg(2, d_binfo); k_dlz.arg(3, d_lit); k_dlz.arg(4, d_tok); k_dlz.arg(5, d_ext);
     k_dlz.arg(6, d_offsym); k_dlz.arg(7, d_cnt);
-    if (host_out_direct) { const char* hp = d_out_host; ZE_OK(zeKernelSetArgumentValue(k_dlz.k, 8, sizeof(hp), &hp)); }
-    else k_dlz.arg(8, d_out);
-    k_dlz.arg(9, d_err); k_dlz.arg(10, nb32);
+    k_dlz.arg(8, d_out); k_dlz.arg(9, d_err); k_dlz.arg(10, nb32);
     k_dlz.launch((nb32 + G / 16 - 1) / (G / 16), G);
     stage("lz");
     host_u32.resize(nb);
     d_err.read(host_u32.data(), nb * 4);
     for (size_t b = 0; b < nb; ++b)
       if (host_u32[b]) throw zb::Error("block damaged (GPU decoder, code " + std::to_string(host_u32[b]) + ")");
-    // the blocks' bytes are B apart on the GPU: one copy into the host staging buffer, handed back as is when
-    // only the last block is short (the usual case), else compacted there
+    // the blocks' bytes are B apart: handed back as they are when only the last block is short (the usual case), else
+    // compacted first
     const size_t span = (nb - 1) * B() + blocks[nb - 1].raw_len;
-    char* stg;
-    if (host_out_direct) {
-      stg = d_out_host;  // (already in host memory)
-    } else {
-      stg = dev.staging(span);
-      dev.copy(stg, d_out.p, span);
-      dev.sync();
-    }
+    char* stg = d_out.p;
     if (span != raw_total) {
       size_t w = 0;
       for (size_t b = 0; b < nb; ++b) { memmove(stg + w, stg + b * B(), blocks[b].raw_len); w += blocks[b].raw_len; }
@@ -315,7 +302,6 @@ struct GpuCodec : Codec {
   }
   // sets the block size the decoder will see (the archive's), compiling the kernels for it
   void prepare(uint32_t block_log) override { ensure_program(block_log); }
-  ~GpuCodec() { if (d_out_host) { dev.sync(); zeMemFree(dev.ctx, d_out_host); } }
 };
 
 }  // namespace zero

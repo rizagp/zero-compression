@@ -37,4 +37,30 @@ inline uint32_t update(uint32_t crc, const void* data, size_t n) {
   return ~c;
 }
 inline uint32_t of(const void* data, size_t n) { return update(0, data, n); }
+
+// the CRC of A followed by B from crc(A), crc(B) and B's length (zlib's method: multiplying by x^(8 len) in GF(2))
+inline uint32_t gf2_times(const uint32_t* m, uint32_t v) {
+  uint32_t s = 0;
+  for (; v; v >>= 1, ++m) if (v & 1) s ^= *m;
+  return s;
+}
+inline void gf2_square(uint32_t* out, const uint32_t* m) { for (int i = 0; i < 32; ++i) out[i] = gf2_times(m, m[i]); }
+inline uint32_t combine(uint32_t a, uint32_t b, uint64_t len_b) {
+  if (!len_b) return a;
+  uint32_t even[32], odd[32];
+  odd[0] = 0xEDB88320u;
+  for (int i = 1; i < 32; ++i) odd[i] = 1u << (i - 1);
+  gf2_square(even, odd);
+  gf2_square(odd, even);
+  do {
+    gf2_square(even, odd);
+    if (len_b & 1) a = gf2_times(even, a);
+    len_b >>= 1;
+    if (!len_b) break;
+    gf2_square(odd, even);
+    if (len_b & 1) a = gf2_times(odd, a);
+    len_b >>= 1;
+  } while (len_b);
+  return a ^ b;
+}
 }  // namespace crc32
