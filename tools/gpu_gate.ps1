@@ -6,7 +6,8 @@ param([int]$Wait = 0, [int]$Stable = 20, [double]$Threshold = 8)
 function Busy {
   $found = @()
   # programs of the other project, whatever they are doing: a loaded server holds the GPU's memory
-  $found += Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*arcinferzero*' } | ForEach-Object { "$($_.ProcessName) (arcinferzero)" }
+  # (ref_forward runs on the CPU only, for a long time, in the middle of that project's GPU work: an idle GPU does not mean it is done)
+  $found += Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*arcinferzero*' -or $_.ProcessName -in 'ref_forward', 'runz' } | ForEach-Object { "$($_.ProcessName) (arcinferzero)" }
   # any program driving a GPU engine; the desktop's own drawing is small and does not count
   $peak = @{}
   foreach ($i in 1..3) {

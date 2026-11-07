@@ -1,8 +1,9 @@
 """Compares the GPU and CPU codecs on large inputs, the whole program, as docs/benchmarks.md reports it.
 
-    python tests/compare_cpu_gpu.py --work D:/temp/zero-bench --model path/to/model.gguf [--model2 path/to/other.gguf]
+    python tests/compare_cpu_gpu.py --work <folder> [--model path/to/model.gguf ...] [--models-only]
 
 Inputs: Windows SDK headers (text) and System32 DLLs (binaries) concatenated into single files, plus any model files.
+--models-only measures just the models and keeps the other results already in the JSON.
 The codecs alternate in each round, with idle gaps. For each it records compress, test (decompress and verify, nothing
 written) and extract (written to disk): wall time, the codec's own time, CPU time of the process, peak memory, and the
 ratio. Extracted files are compared by SHA-256. Needs psutil. Everything under --work is deleted at the end; the results
@@ -120,34 +121,42 @@ def main():
     ap.add_argument('--model', action='append', default=[])
     ap.add_argument('--gap', type=float, default=8)
     ap.add_argument('--binaries-gib', type=float, default=8)
+    ap.add_argument('--models-only', action='store_true', help='measure only --model files, and add them to the results already there')
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     exe = os.path.join(a.work, 'zero.exe')
     shutil.copy(os.path.join(ROOT, 'bin', 'zero.exe'), exe)  # (a build meanwhile cannot change what is measured)
     data = []
+    build = not a.models_only
     text = os.path.join(a.work, 'text.bin')
-    n = concat(text, tree(r'C:\Program Files (x86)\Windows Kits\10\Include', ['*.h', '*.idl', '*.inl', '*.hpp']), 2 * GIB)
-    data.append(dict(name='Text (Windows SDK headers)', path=text, bytes=n, rounds=3))
-    dlls = tree(r'C:\Windows\System32', ['*.dll'])
-    bin8 = os.path.join(a.work, 'bin8.bin')
-    n = concat(bin8, dlls, int(a.binaries_gib * GIB))
-    bin1 = os.path.join(a.work, 'bin1.bin')
-    n1 = concat(bin1, [bin8], GIB)
-    data.append(dict(name='Binaries, 1 GiB (System32 DLLs)', path=bin1, bytes=n1, rounds=3))
-    data.append(dict(name='Binaries, %.1f GiB (System32 DLLs)' % (n / GIB), path=bin8, bytes=n, rounds=2))
-    rnd = os.path.join(a.work, 'random.bin')
-    with open(rnd, 'wb') as f:
-        for _ in range(2 * 1024 // 16):
-            f.write(os.urandom(16 << 20))
-    data.append(dict(name='Random, 2 GiB (cannot be compressed)', path=rnd, bytes=os.path.getsize(rnd), rounds=2))
+    if build:
+        n = concat(text, tree(r'C:\Program Files (x86)\Windows Kits\10\Include', ['*.h', '*.idl', '*.inl', '*.hpp']), 2 * GIB)
+        data.append(dict(name='Text (Windows SDK headers)', path=text, bytes=n, rounds=3))
+        dlls = tree(r'C:\Windows\System32', ['*.dll'])
+        bin8 = os.path.join(a.work, 'bin8.bin')
+        n = concat(bin8, dlls, int(a.binaries_gib * GIB))
+        bin1 = os.path.join(a.work, 'bin1.bin')
+        n1 = concat(bin1, [bin8], GIB)
+        data.append(dict(name='Binaries, 1 GiB (System32 DLLs)', path=bin1, bytes=n1, rounds=3))
+        data.append(dict(name='Binaries, %.1f GiB (System32 DLLs)' % (n / GIB), path=bin8, bytes=n, rounds=2))
+        rnd = os.path.join(a.work, 'random.bin')
+        with open(rnd, 'wb') as f:
+            for _ in range(2 * 1024 // 16):
+                f.write(os.urandom(16 << 20))
+        data.append(dict(name='Random, 2 GiB (cannot be compressed)', path=rnd, bytes=os.path.getsize(rnd), rounds=2))
     for m in a.model:
         big = os.path.getsize(m) > 4 * GIB
-        data.append(dict(name=os.path.basename(m), path=m, bytes=os.path.getsize(m), rounds=1 if big else 3, on_usb=True))
+        data.append(dict(name=os.path.basename(m), path=m, bytes=os.path.getsize(m), rounds=1 if big else 3))
     bat = psutil.sensors_battery()
     results = dict(date=time.strftime('%Y-%m-%d'), machine=dict(cpu='Intel Core Ultra 5 125H', threads=psutil.cpu_count(), ram_gib=round(psutil.virtual_memory().total / GIB),
                    gpu='Arc iGPU (Xe-LPG, 112 EUs)', os=platform.platform(), plugged_in=bat.power_plugged if bat else None), block_log=18, level=5, datasets=[])
     out_json = os.path.join(ROOT, 'docs', 'data', 'benchmarks.json')
     os.makedirs(os.path.dirname(out_json), exist_ok=True)
+    if a.models_only and os.path.exists(out_json):
+        with open(out_json) as f:
+            old = json.load(f)
+        names = {d['name'] for d in data}
+        results['datasets'] = [x for x in old['datasets'] if x['name'] not in names]
     try:
         for d in data:
             runs = dict(gpu=[], cpu=[])
@@ -158,7 +167,7 @@ def main():
                     runs[label].append(x)
                     print('  %s round %d: compress %.1f s (codec %.1f) %.2f %%, test %.1f s, extract %.1f s, identical %s' % (
                         label, r + 1, x['compress']['wall'], x['compress']['codec'], x['compress']['ratio'], x['test']['wall'], x['extract']['wall'], x.get('identical', '-')), flush=True)
-            results['datasets'].append(dict(name=d['name'], bytes=d['bytes'], on_usb=d.get('on_usb', False), runs=runs))
+            results['datasets'].append(dict(name=d['name'], bytes=d['bytes'], runs=runs))
             with open(out_json, 'w') as f:
                 json.dump(results, f, indent=1)
     finally:

@@ -8,9 +8,10 @@ this one: a discrete Arc card or another CPU would give different results.
 
 - **On large ordinary files the two take about the same time, but the GPU leaves the CPU free.** Compressing 6.46 GiB used 35 s
   of CPU time with the GPU and 323 s with the CPU codec.
-- **The CPU makes archives 5 to 15 % smaller,** because its search finds better matches.
+- **On ordinary files the CPU makes archives 5 to 15 % smaller,** because its search finds better matches. On a quantized model
+  the two come out the same.
 - **On small files the CPU is faster,** because the GPU has to be opened and its memory set up first.
-- **On data that hardly compresses the GPU compresses faster.**
+- **On data that hardly compresses the GPU compresses faster:** 35 s against 57 s on an 11.29 GiB model.
 
 So use the GPU, the default, when the machine has other work to do or the data hardly compresses. Use `--cpu` for the smallest
 archives, and for small files when you want the fastest result.
@@ -42,15 +43,26 @@ own buffers. Decoding with the GPU holds up to about 4 GiB, because it decodes u
 
 ### A large model file
 
-A quantized model hardly compresses at all, which is the GPU's best case. This was measured on the previous format (ZB1) with
-1 MiB blocks, on 12.15 GiB read from a USB disk, and has not been repeated on the current one:
+A quantized model hardly compresses at all. These are the two files of one model, read from and written to the SSD:
 
-| | Compress | Size |
-|---|---|---|
-| GPU | 80 s | 97.5 % |
-| CPU | 631 s | 97.5 % |
+| File | | Compress | Size | CPU time to compress | Check archive | Extract |
+|---|---|---|---|---|---|---|
+| Quantized weights, 11.29 GiB | GPU | 35.4 s | 99.2 % | 56 s | 7.2 s | 111.5 s |
+| | CPU | 56.6 s | 99.2 % | 754 s | 5.4 s | 82.4 s |
+| Multimodal projector (bfloat16), 0.87 GiB | GPU | 2.8 s | 78.2 % | 4 s | 1.3 s | 1.8 s |
+| | CPU | 3.8 s | 78.7 % | 52 s | 0.9 s | 1.3 s |
 
-To measure it again: `python tests/compare_cpu_gpu.py --work <folder> --model <file.gguf>`.
+Together, 12.15 GiB compress in 38 s on the GPU and 60 s on the CPU, and the CPU spends about 60 s against 805 s of processor time.
+
+The extracted files matched by SHA-256, and each archive was also read by the other codec. The weights ran once, GPU first, so
+that row is a single sample, and the GPU may have found less of the file in the cache. The projector is the median of three
+rounds. Extracting the weights is slow because of what lies outside the codec, whose own share was about 6.5 s on either.
+
+On the previous format (ZB1), with 1 MiB blocks and reading from a USB disk, the same 12.15 GiB took 80 s on the GPU and 631 s on
+the CPU. Disk, format and block size all changed at once, so that gap of 8x cannot be split between them, and it should not be
+quoted for the current format.
+
+To measure only models, keeping the other results: `python tests/compare_cpu_gpu.py --work <folder> --model <file.gguf> --models-only`.
 
 ## The GPU codec by itself
 
@@ -80,8 +92,8 @@ Those were taken before the 5-byte hash and sorted buckets, which moved level 5 
 
 ### Why not the CPU and the GPU together
 
-It was built and measured. On mixed files it compressed at 390 MB/s against about 280 for either alone, but on a 12 GiB model it
-took 128 s against the GPU's 80 s, because the GPU waited for blocks the CPU had not finished. Leaving the CPU out of batches it
+It was built and measured, on the previous format. On mixed files it compressed at 390 MB/s against about 280 for either alone,
+but on a 12 GiB model read from a USB disk it took 128 s against the GPU's 80 s, because the GPU waited for blocks the CPU had not finished. Leaving the CPU out of batches it
 slowed still took 96 s. Decoding together was slower than either alone. It was dropped.
 
 ## How to measure
